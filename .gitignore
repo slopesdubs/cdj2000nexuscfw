@@ -1,0 +1,16 @@
+*.UPD
+*.upd
+*.bin
+*.zip
+*.rar
+*.7z
+*.pdf
+build/
+work/
+out/
+__pycache__/
+*.pyc
+.DS_Store
+*.elf
+*.o
+*.a
