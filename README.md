@@ -18,10 +18,10 @@ dormant feature — the supporting code does not exist. A controlled comparison 
 the CDJ-2000NXS2 shows thirteen identical rekordbox analysis-tag entries and exactly two
 differences: `PWV4` and `PWV5`. See FINDINGS §1.
 
-**Partially solved:** the complete PWV3 parser-to-MAIN/GUI-frame path is mapped. An
-offline emulator reproduces and validates the stock 896-byte detailed-waveform frames.
-The physical transport handoff, GUI-side receiver/renderer, and NXS2 GUI segment
-compression remain unresolved.
+**Partially solved:** the complete PWV3 parser-to-GUI-consumer path is mapped. An
+offline emulator reproduces the stock 896-byte frames, Blackfin reassembly, and the
+first per-column GUI transform. The final record-to-framebuffer renderer and NXS2 GUI
+segment compression remain unresolved.
 
 **Untested:** everything, on hardware.
 
@@ -106,6 +106,16 @@ python3 tools/cdj_lab.py emulate-waveform work/samples/ANLZ0000.EXT \
   --output work/analysis/nxs-wave-emulator
 ```
 
+Reproduce the stock Blackfin GUI receiver trace:
+
+```bash
+./scripts/build-bfin-binutils.sh
+python3 tools/cdj_lab.py trace-gui \
+  work/unpacked/nxs-stock/GUI.segment \
+  --objdump work/toolchain/bfin-elf/bin/bfin-elf-objdump \
+  --output work/analysis/gui-receiver
+```
+
 Extract the MAIN processor image:
 
 ```python
@@ -172,11 +182,12 @@ Keep untouched stock v1.44 on a USB stick at all times as the way back.
 
 ## Next steps
 
-1. Trace the emulated frame buffer through the final physical MAIN→GUI send handoff.
-2. Find the matching GUI-side frame receiver and reproduce its PWV3 decoding offline.
+1. Trace the 12-byte Blackfin column records into the indirect RGB565 drawing call.
+2. Crack or bypass the NXS2 compressed GUI stream and compare its PWV5 receiver and
+   per-column structure as the colour positive control.
 3. Make two phase-timed Ethernet captures with the same track and run the correlation
    scanner. A negative result is useful and expected to be possible.
-4. Trace the NXS2 `PWV5` handler as a control and compare its output structure.
+4. Trace the NXS2 MAIN `PWV5` handler and outbound message as a control.
 5. Only after the trace phase, prove the stock/rebuild/recovery loop on sacrificial
    hardware before any code injection or colour-waveform patch design.
 

@@ -21,16 +21,20 @@ from anlz_color import (  # noqa: E402
 )
 from lzss_codec import compress, decompress  # noqa: E402
 from ethernet_trace import compare_captures, scan_capture  # noqa: E402
+from gui_receiver_trace import FINAL, ZEROFILL, flatten_code, parse_ldr_blocks  # noqa: E402
 from nxs_wave_emulator import (  # noqa: E402
     CRC_OFFSET,
     EXTENSION_PAYLOAD_CAPACITY,
     FIRST_PAYLOAD_CAPACITY,
     FRAME_SIZE,
     WaveEmulatorError,
+    decode_gui_wave_columns,
     emulate_anlz_file,
+    emulate_gui_receiver,
     encode_detail_frames,
     extract_waveform_source,
     inspect_detail_frames,
+    pack_gui_wave_records,
     reassemble_detail_frames,
 )
 from srec_parse import SRecError, parse_srec  # noqa: E402
@@ -237,6 +241,24 @@ class NxsWaveEmulatorTests(unittest.TestCase):
         with self.assertRaisesRegex(WaveEmulatorError, "CRC mismatch"):
             inspect_detail_frames(damaged)
 
+    def test_gui_receiver_reassembles_and_decodes_legacy_columns(self):
+        payload = bytes((0b10111101, 0b01000011, 0b11111111))
+        result = emulate_gui_receiver(encode_detail_frames(payload))
+        self.assertEqual(result.payload, payload)
+        self.assertEqual(
+            [(column.height, column.color_code) for column in result.columns],
+            [(29, 5), (3, 2), (31, 7)],
+        )
+        self.assertEqual(result.columns[0].packed_word, 0x051D)
+        self.assertEqual(result.records, pack_gui_wave_records(payload))
+        self.assertEqual(result.records[:3], b"\x1D\x05\x00")
+        self.assertEqual(len(result.records), len(payload) * 12)
+
+    def test_gui_column_decoder_is_exhaustive(self):
+        columns = decode_gui_wave_columns(bytes(range(256)))
+        self.assertEqual({column.height for column in columns}, set(range(32)))
+        self.assertEqual({column.color_code for column in columns}, set(range(8)))
+
     def test_anlz_artifacts_are_byte_identical(self):
         payload = bytes(range(64)) * 20
         anlz = make_anlz(make_pwv3(payload))
@@ -250,12 +272,29 @@ class NxsWaveEmulatorTests(unittest.TestCase):
             input_path.write_bytes(anlz)
             manifest = emulate_anlz_file(input_path, output)
             reassembled = (output / "reassembled-payload.bin").read_bytes()
+            gui_record_size = (output / "gui-column-records.bin").stat().st_size
             manifest_on_disk = (output / "manifest.json").read_text("utf-8")
 
         self.assertEqual(reassembled, payload)
         self.assertTrue(manifest["verification"]["all_crc_valid"])
         self.assertTrue(manifest["verification"]["byte_identical_round_trip"])
+        self.assertEqual(manifest["gui_receiver"]["first_consumer"], "0x00D2F51C")
+        self.assertEqual(gui_record_size, len(payload) * 12)
         self.assertIn('"frame_size": 896', manifest_on_disk)
+
+
+class GuiReceiverTraceTests(unittest.TestCase):
+    def test_ldr_parser_and_code_flattening(self):
+        header = b"CDJ-2000NXS GUIVer1.44\0".ljust(32, b" ")
+        code = struct.pack("<IIH", 0x00C60010, 4, 0) + b"ABCD"
+        zero = struct.pack("<IIH", 0x00C60020, 3, ZEROFILL)
+        final = struct.pack("<IIH", 0x00C60030, 2, FINAL) + b"EF"
+        blocks = parse_ldr_blocks(header + code + zero + final)
+        image = flatten_code(blocks)
+        self.assertEqual(len(blocks), 3)
+        self.assertEqual(image[0x10:0x14], b"ABCD")
+        self.assertEqual(image[0x20:0x23], b"\0\0\0")
+        self.assertEqual(image[0x30:0x32], b"EF")
 
 
 class EthernetTraceTests(unittest.TestCase):

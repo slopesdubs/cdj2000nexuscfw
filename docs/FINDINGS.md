@@ -229,7 +229,8 @@ relocated block (`0xA00008A6` in-file).
 
 ## 6. GUI (Blackfin) findings
 
-Less complete than MAIN — this processor was not fully mapped.
+The detailed-waveform receive path is now mapped through its first display-oriented
+consumer. Final pixel drawing remains unresolved.
 
 - **Framebuffer at `0x00659B88`**, read directly from a live DMA descriptor at
   `0x00CC4EAC` (not inferred). Fed by DMA0 → PPI in a self-relinking loop; 480 px wide,
@@ -239,22 +240,64 @@ Less complete than MAIN — this processor was not fully mapped.
   `~0x00C6A7F8`–`0x00C6AEFC`. **Nothing references those addresses** anywhere in the
   ~915 KB of decoded code — not as computed constants, not as pointer-table entries.
   They are almost certainly linker/debug residue; any real dispatch is indirect.
-- **SPORT1 is configured and its RX interrupt armed** (`0x00D0C548` sets
-  `TCR2`/`RCR2 = 0x020F`, `TCR1 = 0x2602`, `RCR1 = 0x6400`; enable/disable pair at
-  `0x00D0C5F2` / `0x00D0C61E`). DMA3 and DMA4 are configured nearby. This is the most
-  likely MAIN↔GUI data link, but **the protocol was not decoded** and no consumer of
-  received words was located.
+- **SPORT1/DMA ownership is verified.** `0x00D0C548` sets `TCR2`/`RCR2 = 0x020F`,
+  `TCR1 = 0x2602`, and `RCR1 = 0x6400`. Routine `0x00D0C59A` writes its buffer and
+  word-count arguments to DMA3 `START_ADDR`/`X_COUNT` (`0xFFC00CC4`/`0xFFC00CD0`),
+  uses a two-byte modify, and enables SPORT1 RX. DMA4 at `0x00D0C66C` owns transmit.
 - **A window/layer struct at `0x00658C74`** — two pointers, two byte flags, a 16-bit
   counter — with a framebuffer-adjacent pointer written into it at `0x00CFC6D2`.
 - A GPIO interrupt priority-encoder at `~0x00D0C1D0` (reads `FIO_FLAG_D`, clears via
   `FIO_FLAG_C`).
 
-**The waveform renderer itself was not found.** A dataflow scan of the entire graphics
-SDRAM window resolved 81 accesses, all to global variables and none to the framebuffer —
-which is expected and diagnostic: real drawing code computes pixel addresses
-(`base + y*stride + x`) from pointers held in variables, so intra-function constant
-tracking cannot reach them. Locating it needs inter-procedural analysis or, far more
-cheaply, a hardware watchpoint on framebuffer memory.
+### Detailed-waveform GUI receiver
+
+Baseline: stock v1.44 GUI segment, SHA-256
+`94a64347…f906bd2`, decoded as little-endian Blackfin with GNU binutils 2.45.1.
+
+**Verified receive path:** initialization and every normal reset arm DMA3 for 32 words
+(64 bytes) at `0x01F00000`. The transport state machine then receives the 896-byte
+message at `0x01F00040`. Routine `0x00D10858` computes CRC16-XMODEM over its first
+894 bytes and compares the word at inner offset `+894`; at `0x00D108D2` it reads the
+inner word at `+0`. Values `6`, `3`, `32`, and `33` have distinct handlers. Value `32`
+branches directly to `0x00D0FA64` — the stock detailed-waveform receiver.
+
+Its reads and copies exactly confirm the MAIN-side frame map:
+
+| inner field | first frame | continuation |
+|---|---:|---:|
+| command | word `+0` = 32 | word `+0` = 32 |
+| sequence | little-endian `u32 +2` | little-endian `u32 +2` |
+| total PWV3 bytes | little-endian `u32 +6` | absent/data begins here |
+| opaque values | words `+10`, `+12` | absent |
+| copied data | `+14`, 880 bytes | `+6`, 888 bytes |
+
+The first frame must have sequence 1. Receiver state stores total bytes at
+`0x006D413C`, write offset at `0x006D4140`, and expected sequence at `0x006D414A`.
+Copies go to fixed buffer `0x01A65168`. Continuations increment and compare the
+sequence before appending. Completion invokes the command event path; event dispatcher
+`0x00D0F36C` recognizes value 32, handler `0x00D0F4F4` loads the retained total, and
+calls the first display consumer at `0x00D2F51C`.
+
+**Verified first consumer:** `0x00D2F51C` reads bytes from `0x01A65168` and produces
+12-byte records beginning at `0x01011940`. For each input byte `b`, it writes:
+
+```text
+record word +0 = (((b & 0xE0) >> 5) << 8) | (b & 0x1F)
+record byte +2 = 0
+record stride   = 12 bytes
+```
+
+This proves the GUI receives raw PWV3 and separates its five-bit height from the
+existing three-bit legacy colour code. It does **not** decode RGB: PWV5 has three
+independent RGB components and twice the bytes per column, while this loop advances
+one byte per record. The live conversion count is clamped through runtime display
+state before the loop, so the exhaustive offline record image is a model rather than
+a claim that every record is always converted in one call.
+
+The remaining edge is narrower: find the indirect drawing call that converts these
+12-byte records to RGB565 framebuffer pixels at `0x00659B88`. A previous constant-only
+dataflow scan could not see computed framebuffer addresses; inter-procedural pointer
+tracking or a hardware watchpoint remains appropriate.
 
 ---
 
@@ -378,9 +421,10 @@ in 68 frames as an explicitly experimental envelope test; this does not imply th
 stock GUI can decode or render them.
 
 This supplies direct data-flow proof from the retained PWV3 locator to an outbound
-detailed-waveform buffer. The only narrower unresolved edge is the final generic-send
-handoff from this shared buffer to physical SPORT/DMA serialization; it does not block
-understanding or reproducing the MAIN-side message construction.
+detailed-waveform buffer. The matching Blackfin receiver in §6 independently confirms
+the frame fields, CRC boundary, chunk offsets, sequence handling, and raw-PWV3 payload.
+The exact SH-4 generic-send routine remains unnamed, but the two ends now prove what
+crosses the SPORT/DMA link and where it is consumed.
 
 The later database path is anchored by firmware debug names. `dbcl_GetWaveData`
 (`0xA4149632`) is called at `0xA41721EE` and `0xA41722D2`; after a successful return,

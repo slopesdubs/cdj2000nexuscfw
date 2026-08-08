@@ -5,8 +5,11 @@ The stock v1.44 constructors at 0xA425BD60 and 0xA425C0CC use one reusable
 extension frames carry 888 bytes after a 6-byte header.  A CRC16-XMODEM over
 the first 894 bytes is stored little-endian in the final two bytes.
 
-This module emulates that boundary only.  It does not emulate the SH-4 CPU,
-the physical SPORT/DMA link, or the Blackfin GUI renderer.
+The stock Blackfin receiver at 0x00D0FA64 reassembles those frames into
+0x01A65168.  Its first consumer at 0x00D2F51C splits every PWV3 byte into a
+five-bit height and three-bit legacy colour code.  This module also models
+that receiver boundary and per-column transform.  It does not emulate either
+CPU, the physical SPORT/DMA link, or pixel rendering.
 """
 
 from __future__ import annotations
@@ -57,6 +60,25 @@ class FrameInfo:
     @property
     def crc_valid(self) -> bool:
         return self.stored_crc == self.calculated_crc
+
+
+@dataclass(frozen=True)
+class GuiWaveColumn:
+    """One stock GUI detailed-waveform column decoded from a PWV3 byte."""
+
+    raw: int
+    height: int
+    color_code: int
+    packed_word: int
+
+
+@dataclass(frozen=True)
+class GuiReceiveResult:
+    """Output of the verified GUI receive/reassembly/column-decode boundary."""
+
+    payload: bytes
+    columns: Sequence[GuiWaveColumn]
+    records: bytes
 
 
 def extract_waveform_source(data: bytes, tag_kind: str = "PWV3") -> WaveformSource:
@@ -221,6 +243,52 @@ def reassemble_detail_frames(frames: Sequence[bytes]) -> bytes:
     )
 
 
+def decode_gui_wave_columns(payload: bytes) -> List[GuiWaveColumn]:
+    """Reproduce the verified per-byte transform at GUI routine 0x00D2F51C.
+
+    The Blackfin stores ``height`` in the low byte and the three-bit colour
+    code in the high byte of a 16-bit value. Runtime code writes those words
+    to 12-byte records; this function returns the semantic fields without
+    inventing meanings for the eight possible legacy colour codes.
+    """
+
+    return [
+        GuiWaveColumn(
+            raw=value,
+            height=value & 0x1F,
+            color_code=(value & 0xE0) >> 5,
+            packed_word=(((value & 0xE0) >> 5) << 8) | (value & 0x1F),
+        )
+        for value in payload
+    ]
+
+
+def pack_gui_wave_records(payload: bytes) -> bytes:
+    """Build an exhaustive offline image of the GUI's 12-byte column records.
+
+    The live routine can clamp the number of converted entries using runtime
+    display state. For deterministic analysis this helper converts the full
+    reassembled payload, using the fields directly proven at record offsets
+    +0 (word) and +2 (zero byte); the remaining bytes stay zero/unknown.
+    """
+
+    records = bytearray(len(payload) * 12)
+    for index, column in enumerate(decode_gui_wave_columns(payload)):
+        struct.pack_into("<H", records, index * 12, column.packed_word)
+    return bytes(records)
+
+
+def emulate_gui_receiver(frames: Sequence[bytes]) -> GuiReceiveResult:
+    """Validate and reassemble command-0x20 frames as the stock GUI does."""
+
+    payload = reassemble_detail_frames(frames)
+    return GuiReceiveResult(
+        payload=payload,
+        columns=decode_gui_wave_columns(payload),
+        records=pack_gui_wave_records(payload),
+    )
+
+
 def emulate_anlz_file(
     source_path: Path,
     output_directory: Path,
@@ -233,7 +301,8 @@ def emulate_anlz_file(
     source = extract_waveform_source(source_path.read_bytes(), tag_kind)
     frames = encode_detail_frames(source.payload, header_word_10, header_word_12)
     information = inspect_detail_frames(frames)
-    reassembled = reassemble_detail_frames(frames)
+    gui_result = emulate_gui_receiver(frames)
+    reassembled = gui_result.payload
     if reassembled != source.payload:
         raise WaveEmulatorError("internal error: reassembled waveform differs from source")
 
@@ -255,10 +324,16 @@ def emulate_anlz_file(
 
     (output_directory / "source-payload.bin").write_bytes(source.payload)
     (output_directory / "reassembled-payload.bin").write_bytes(reassembled)
+    gui_columns = gui_result.columns
+    gui_records = gui_result.records
+    (output_directory / "gui-column-records.bin").write_bytes(gui_records)
     payload_digest = hashlib.sha256(source.payload).hexdigest()
     manifest = {
         "schema": 1,
-        "emulator_scope": "stock NXS detailed-waveform MAIN-to-GUI frame boundary",
+        "emulator_scope": (
+            "stock NXS detailed-waveform MAIN frame construction through the "
+            "first verified GUI per-column consumer"
+        ),
         "source": {
             "path": str(source_path.resolve()),
             "tag": source.tag,
@@ -289,6 +364,33 @@ def emulate_anlz_file(
             "all_crc_valid": all(item.crc_valid for item in information),
             "reassembled_payload_sha256": hashlib.sha256(reassembled).hexdigest(),
             "byte_identical_round_trip": reassembled == source.payload,
+        },
+        "gui_receiver": {
+            "sport_init": "0x00D0C548",
+            "dma3_receive_setup": "0x00D0C59A",
+            "transport_header_address": "0x01F00000",
+            "transport_header_bytes": 64,
+            "frame_address": "0x01F00040",
+            "dispatch": "0x00D108D2 -> command 0x20 -> 0x00D0FA64",
+            "reassembly_buffer": "0x01A65168",
+            "completion_event": 32,
+            "event_dispatch": "0x00D0F36C -> 0x00D0F4F4",
+            "first_consumer": "0x00D2F51C",
+            "column_transform": {
+                "height": "raw & 0x1F",
+                "legacy_color_code": "(raw & 0xE0) >> 5",
+                "packed_word": "legacy_color_code << 8 | height",
+                "record_stride": 12,
+                "converted_records": len(gui_columns),
+                "offline_record_file": "gui-column-records.bin",
+                "offline_record_sha256": hashlib.sha256(gui_records).hexdigest(),
+                "note": (
+                    "offline output converts every entry; live firmware may clamp "
+                    "the count using runtime display state; experimental PWV5 input "
+                    "is still consumed one byte at a time and therefore becomes two "
+                    "legacy records per real PWV5 column, not RGB"
+                ),
+            },
         },
     }
     (output_directory / "manifest.json").write_text(

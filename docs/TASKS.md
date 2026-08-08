@@ -62,10 +62,13 @@ one-per-issue. Suggested labels in brackets.
       reassemble the exact 896-byte stock frame envelope, including reusable-buffer
       tail behavior. The canonical 29,804-byte PWV3 sample round-trips through 34
       frames byte-identically. `[tooling] [milestone]`
-- [ ] **Confirm the final physical transport handoff.** Trace shared buffer
-      `0x04985564` from the detailed-waveform scheduler through the generic send call
-      into the actual MAIN→GUI SPORT/DMA serializer. The message format itself is
-      already proven, so this is no longer a parser/consumer blocker. `[analysis]`
+- [x] **Confirm the GUI physical ingress and command-32 receiver.** SPORT1/DMA3 takes
+      a 64-byte transport header followed by the 896-byte frame, CRC-checks it, and
+      dispatches command 32 to `0x00D0FA64`. It reassembles raw PWV3 at `0x01A65168`;
+      event 32 reaches first consumer `0x00D2F51C`. `[analysis] [milestone]`
+- [ ] **Name the final MAIN generic-send routine.** Receiver-side proof closes the
+      data-format boundary, so this is useful call-graph cleanup rather than a blocker.
+      `[analysis] [low-priority]`
 - [ ] **Capture Ethernet twice.** Same track and phase timeline; scan both PCAPs with
       `tools/ethernet_trace.py`. A repeated absence is still evidence. `[hardware]`
 
@@ -88,14 +91,13 @@ one-per-issue. Suggested labels in brackets.
       instrumentation below. **Do this before buying test gear.** `[analysis] [high-value]`
 - [ ] **Locate the updater's validation code** in the decompressed image. Would explain
       any rejection, and confirm exactly what it checks. `[analysis]`
-- [ ] **Finish decoding the MAIN↔GUI protocol.** Legacy message IDs 4/5 and the raw
-      PWV3 detailed-waveform 896-byte frame constructors are mapped; physical transport
-      ownership and the GUI-side receiver remain unresolved. Logic analyser on the
-      inter-board link if static work stalls.
-      `[hardware] [instrumentation]`
-- [ ] **Find the GUI waveform renderer.** Last unmapped subsystem. Needs
-      inter-procedural analysis or a hardware watchpoint on framebuffer memory
-      (`0x00659B88`). `[analysis] [instrumentation]`
+- [x] **Decode the detailed-waveform MAIN↔GUI protocol.** The raw PWV3 constructors,
+      SPORT1/DMA3 ingress, CRC gate, command-32 receiver, reassembly, completion event,
+      and first one-byte-to-12-byte column transform are all mapped. `[analysis]`
+- [ ] **Find the final GUI waveform renderer.** Follow the 12-byte records at
+      `0x01011940` through the indirect drawing call to framebuffer `0x00659B88`.
+      Inter-procedural pointer tracking or a hardware watchpoint may still help.
+      `[analysis] [instrumentation]`
 - [ ] **Crack the NXS2 GUI segment compression** (ADI "compressed streams"). The one
       remaining unknown in the container format. Not on the critical path.
       `[analysis] [low-priority]`

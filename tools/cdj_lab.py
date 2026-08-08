@@ -16,6 +16,11 @@ from anlz_color import (
     parse_pwv5,
     render_anlz_file,
 )
+from gui_receiver_trace import (
+    GuiTraceError,
+    build_gui_receiver_trace,
+    write_gui_receiver_trace,
+)
 from nxs_wave_emulator import WaveEmulatorError, emulate_anlz_file
 from sh4_trace import DEFAULT_BASE, build_trace, parse_int, write_trace_outputs
 from upd_container import (
@@ -181,7 +186,26 @@ def emulate_waveform(args: argparse.Namespace) -> int:
         f"CRC={'OK' if verification['all_crc_valid'] else 'FAIL'}, "
         f"round-trip={'byte-identical' if verification['byte_identical_round_trip'] else 'FAIL'}"
     )
+    gui = manifest["gui_receiver"]
+    print(
+        f"GUI receiver={gui['first_consumer']}, "
+        f"records={gui['column_transform']['converted_records']} x "
+        f"{gui['column_transform']['record_stride']} bytes"
+    )
     print(f"wrote frames and manifest to {args.output}")
+    return 0
+
+
+def trace_gui(args: argparse.Namespace) -> int:
+    trace, disassemblies = build_gui_receiver_trace(args.path, args.objdump)
+    write_gui_receiver_trace(trace, disassemblies, args.output)
+    receiver = trace["receiver"]
+    consumer = trace["consumer"]
+    print(
+        f"verified GUI command {receiver['message_word']} receiver "
+        f"{receiver['handler']} -> {consumer['first_consumer']}"
+    )
+    print(f"wrote GUI receiver trace to {args.output}")
     return 0
 
 
@@ -224,6 +248,14 @@ def build_parser() -> argparse.ArgumentParser:
     trace.add_argument("--lookup-site", action="append", type=parse_int)
     trace.set_defaults(handler=trace_main)
 
+    gui_trace = commands.add_parser(
+        "trace-gui", help="trace the stock NXS Blackfin detailed-waveform receiver"
+    )
+    gui_trace.add_argument("path", type=Path, help="stock v1.44 GUI.segment or .UPD")
+    gui_trace.add_argument("--output", "-o", type=Path, required=True)
+    gui_trace.add_argument("--objdump", type=Path, required=True)
+    gui_trace.set_defaults(handler=trace_gui)
+
     emulate = commands.add_parser(
         "emulate-waveform",
         help="emulate stock NXS detailed-waveform MAIN-to-GUI frames",
@@ -252,7 +284,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
-    except (OSError, UpdError, AnlzError, WaveEmulatorError, ValueError) as exc:
+    except (
+        OSError,
+        UpdError,
+        AnlzError,
+        WaveEmulatorError,
+        GuiTraceError,
+        ValueError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
