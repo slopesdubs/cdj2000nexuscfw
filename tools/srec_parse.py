@@ -1,53 +1,118 @@
-import sys
+"""Small, dependency-free Motorola S-record parser.
 
-def parse_srec(text_bytes):
-    """Parse Motorola S-record text, return dict: {'data': {addr: bytes}, 'entries': [(type, addr)]}"""
-    lines = text_bytes.replace(b'\r\n', b'\n').split(b'\n')
-    chunks = []  # (addr, bytes)
-    entries = []
-    header = None
-    for ln in lines:
-        ln = ln.strip()
-        if not ln or not ln.startswith(b'S'):
+The Pioneer S-record segments have a 32-byte ASCII prefix before the first S0
+record.  Non-record lines are therefore ignored, while records themselves can be
+strictly checksum-validated.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+
+class SRecError(ValueError):
+    """Raised when a strict S-record parse encounters malformed input."""
+
+
+_ADDRESS_BYTES = {
+    "0": 2,
+    "1": 2,
+    "2": 3,
+    "3": 4,
+    "7": 4,
+    "8": 3,
+    "9": 2,
+}
+
+
+def parse_srec(
+    text_bytes: bytes, validate: bool = False
+) -> Tuple[Optional[bytes], List[Tuple[int, bytes]], List[Tuple[str, int]]]:
+    """Parse Motorola S-record text.
+
+    Returns ``(header, chunks, entries)``. ``header`` is the S0 data payload,
+    ``chunks`` contains ``(address, bytes)`` pairs for S1/S2/S3 records, and
+    ``entries`` contains termination-record type/address pairs.
+
+    When ``validate`` is true, malformed hex, lengths, unsupported record types,
+    and checksum failures raise :class:`SRecError`.
+    """
+
+    chunks: List[Tuple[int, bytes]] = []
+    entries: List[Tuple[str, int]] = []
+    header: Optional[bytes] = None
+
+    for line_number, raw_line in enumerate(
+        text_bytes.replace(b"\r\n", b"\n").split(b"\n"), start=1
+    ):
+        line = raw_line.strip()
+        if line and not line.startswith(b"S"):
+            # Pioneer places its 32-byte ASCII segment header directly before S0,
+            # without a line break. Find the first plausible embedded record.
+            for candidate in range(max(0, len(line) - 3)):
+                if (
+                    line[candidate : candidate + 1] == b"S"
+                    and line[candidate + 1 : candidate + 2] in b"0123789"
+                    and all(chr(value) in "0123456789abcdefABCDEF" for value in line[candidate + 2 : candidate + 4])
+                ):
+                    line = line[candidate:]
+                    break
+        if not line or not line.startswith(b"S"):
             continue
-        rtype = chr(ln[1])
         try:
-            count = int(ln[2:4], 16)
-        except Exception:
+            record_type = chr(line[1])
+            address_bytes = _ADDRESS_BYTES[record_type]
+            count = int(line[2:4], 16)
+            encoded = line[4:]
+            if len(encoded) != count * 2:
+                raise SRecError(
+                    f"line {line_number}: count says {count} bytes, "
+                    f"found {len(encoded) // 2}"
+                )
+            record = bytes.fromhex(encoded.decode("ascii"))
+            if len(record) < address_bytes + 1:
+                raise SRecError(f"line {line_number}: record is too short")
+            if (count + sum(record)) & 0xFF != 0xFF:
+                raise SRecError(f"line {line_number}: checksum mismatch")
+        except (IndexError, KeyError, UnicodeDecodeError, ValueError) as exc:
+            if validate:
+                if isinstance(exc, SRecError):
+                    raise
+                raise SRecError(f"line {line_number}: malformed S-record") from exc
             continue
-        payload = ln[4:4+count*2]
-        if rtype == '0':
-            header = bytes.fromhex(payload.decode())
-        elif rtype in ('1','2','3'):
-            addr_len = {'1':4,'2':6,'3':8}[rtype]
-            addr = int(payload[:addr_len], 16)
-            data = bytes.fromhex(payload[addr_len:-2].decode())
-            chunks.append((addr, data))
-        elif rtype in ('7','8','9'):
-            addr_len = {'7':8,'8':6,'9':4}[rtype]
-            addr = int(payload[:addr_len], 16)
-            entries.append((rtype, addr))
+
+        address = int.from_bytes(record[:address_bytes], "big")
+        payload = record[address_bytes:-1]
+        if record_type == "0":
+            header = payload
+        elif record_type in ("1", "2", "3"):
+            chunks.append((address, payload))
+        elif record_type in ("7", "8", "9"):
+            entries.append((record_type, address))
+
+    if validate and not chunks:
+        raise SRecError("no S1/S2/S3 data records found")
     return header, chunks, entries
 
-for name in ['DRIV','MAIN','PANL']:
-    pass
 
-data = open('C2KNXS.UPD','rb').read()
-sizes = {'GUI':2015268,'DRIV':388690,'MAIN':7062204,'PANL':98888}
-off = 33
-segs = {}
-for n in ['GUI','DRIV','MAIN','PANL']:
-    segs[n] = data[off:off+sizes[n]]
-    off += sizes[n]
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Inspect a Motorola S-record segment")
+    parser.add_argument("path", type=Path)
+    args = parser.parse_args(argv)
 
-for n in ['DRIV','MAIN','PANL']:
-    header, chunks, entries = parse_srec(segs[n])
-    total_bytes = sum(len(d) for a,d in chunks)
-    minaddr = min(a for a,d in chunks)
-    maxaddr = max(a+len(d) for a,d in chunks)
-    print(f"=== {n} ===")
-    print("header:", header)
-    print("num chunks:", len(chunks), "total data bytes:", hex(total_bytes))
-    print("addr range:", hex(minaddr), '-', hex(maxaddr))
-    print("entry records:", [(t, hex(a)) for t,a in entries])
-    print()
+    header, chunks, entries = parse_srec(args.path.read_bytes(), validate=True)
+    total = sum(len(data) for _, data in chunks)
+    low = min(address for address, _ in chunks)
+    high = max(address + len(data) for address, data in chunks)
+    print(f"header: {header!r}")
+    print(f"records: {len(chunks)}")
+    print(f"data bytes: {total} (0x{total:X})")
+    print(f"address range: 0x{low:X}-0x{high:X}")
+    print("entries:", ", ".join(f"S{kind}=0x{address:X}" for kind, address in entries))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

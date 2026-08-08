@@ -18,8 +18,9 @@ dormant feature — the supporting code does not exist. A controlled comparison 
 the CDJ-2000NXS2 shows thirteen identical rekordbox analysis-tag entries and exactly two
 differences: `PWV4` and `PWV5`. See FINDINGS §1.
 
-**Not solved:** the MAIN↔GUI protocol, the GUI waveform renderer, the NXS2's GUI
-segment compression.
+**Partially solved:** MAIN waveform message IDs 4/5 and the normal message constructor
+are mapped. The exact PWV3/database-result staging edge into that constructor, the
+GUI-side receiver/renderer, and the NXS2 GUI segment compression remain unresolved.
 
 **Untested:** everything, on hardware.
 
@@ -40,6 +41,7 @@ Also excluded: service manuals, device dumps, and anything unit-specific.
 ```
 docs/
   FINDINGS.md              main reference - read first
+  LAB.md                   offline firmware/ANLZ inspection and waveform rendering
   TOOLCHAIN.md             building the SH-4 cross-compiler
   DECISIONS.md             append-only decisions log
   ARCHIVE-working-notes.md superseded running notes, kept for history
@@ -47,10 +49,17 @@ tools/
   srec_parse.py            Motorola S-record parser
   lzss_codec.py            LZSS compressor + decompressor (matches firmware exactly)
   upd_build.py             S-record generation, CRC16-XMODEM, .UPD assembly
+  upd_container.py         strict .UPD parser, CRC validation, MAIN extraction
+  anlz_color.py            PWV4/PWV5 parser + dependency-free PNG renderer
+  cdj_lab.py               command-line entry point for the offline lab
+  sh4_trace.py             read-only SH-4 tag/xref/data-flow report generator
+  ethernet_trace.py        read-only PCAP/PCAPNG waveform correlation scanner
   sh4dis.py                SH-4 disassembler (little-endian)
   bfindis.py               Blackfin disassembler (GUI processor)
   dataflow.py              Blackfin constant/pointer propagation
   harness.py               GUI image loader + dataflow queries
+scripts/
+  build-sh4-binutils.sh    pinned project-local GNU SH-4 binutils build
 ```
 
 `srec_parse` → `lzss_codec` → `upd_build` are the three that matter for rebuilding
@@ -64,6 +73,28 @@ firmware. The rest are analysis only.
 ```bash
 python3 --version          # 3.8+; no dependencies needed
 # place your own stock C2KNXS.UPD in the working directory
+```
+
+Run the synthetic test suite and see the offline lab guide:
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 tools/cdj_lab.py --help
+```
+
+See [`docs/LAB.md`](docs/LAB.md) for firmware inspection and `PWV4`/`PWV5`
+rendering commands. Real firmware and rekordbox analysis samples belong under the
+ignored `work/` directory.
+
+Reproduce the targeted stock-v1.44 trace:
+
+```bash
+./scripts/build-sh4-binutils.sh
+python3 tools/cdj_lab.py trace-main \
+  work/unpacked/nxs-stock/MAIN_decomp.bin \
+  --objdump work/toolchain/sh-elf/bin/sh-elf-objdump \
+  --anlz work/samples/ANLZ0000.EXT \
+  --output work/analysis/pwv3
 ```
 
 Extract the MAIN processor image:
@@ -132,13 +163,13 @@ Keep untouched stock v1.44 on a USB stick at all times as the way back.
 
 ## Next steps
 
-1. Official stock update on a sacrificial unit — proves procedure and media.
-2. Flash the v1.45 rebuild. **Pass = deck displays 1.45.**
-3. Prove recovery: return to stock, confirm it takes.
-4. Inject code into free space (~331 KB of `0xFF` padding; largest blocks at
-   `0xA40D57C4` and `0xA43C55F8`). Pass = deck still boots. Needs the SH-4 toolchain.
-5. Decode the MAIN↔GUI protocol; locate the GUI waveform renderer. Needs hardware
-   instrumentation — or possibly the serial debug console described in FINDINGS §8c.
+1. Close the single static edge from the saved PWV3/database result into the GUI
+   builder's 36-byte source records.
+2. Make two phase-timed Ethernet captures with the same track and run the correlation
+   scanner. A negative result is useful and expected to be possible.
+3. Trace the NXS2 `PWV5` handler as a control and compare its output structure.
+4. Only after the trace phase, prove the stock/rebuild/recovery loop on sacrificial
+   hardware before any code injection or colour-waveform patch design.
 
 ## Licence
 
