@@ -364,12 +364,23 @@ shared buffer `0x04985564`; there is no height or pixel transformation in these 
 | computed 16-bit trailer | `+0x37E` | `+0x37E` |
 | total frame size | 896 | 896 |
 
-The trailer is computed by `0xA4310FC0`. Sequence/count words are maintained at
-`+2`/`+4`, and the extension path subtracts 888 bytes from the remaining count per
-frame. This supplies direct data-flow proof from the retained PWV3 locator to an
-outbound detailed-waveform buffer. The only narrower unresolved edge is the final
-generic-send handoff from this shared buffer to physical SPORT/DMA serialization;
-it does not block understanding or reproducing the MAIN-side message construction.
+The trailer is computed by `0xA4310FC0`. Direct reconstruction of its shift/XOR loop
+proves it is CRC16-XMODEM (polynomial `0x1021`, initial value zero) over the first 894
+bytes, stored little-endian. Sequence/count words are maintained at `+2`/`+4`, and the
+extension path subtracts 888 bytes from the remaining count per frame. The reusable
+buffer is not cleared between extensions, so unused bytes in the final short frame
+retain the previous frame's tail and are included in its CRC.
+
+`tools/nxs_wave_emulator.py` reproduces this behavior. Applied to the supplied EXT, it
+turns the 29,804 PWV3 bytes into 34 fixed frames, validates every CRC, and reassembles
+the source payload byte-identically. The same harness can place 59,608 raw PWV5 bytes
+in 68 frames as an explicitly experimental envelope test; this does not imply that the
+stock GUI can decode or render them.
+
+This supplies direct data-flow proof from the retained PWV3 locator to an outbound
+detailed-waveform buffer. The only narrower unresolved edge is the final generic-send
+handoff from this shared buffer to physical SPORT/DMA serialization; it does not block
+understanding or reproducing the MAIN-side message construction.
 
 The later database path is anchored by firmware debug names. `dbcl_GetWaveData`
 (`0xA4149632`) is called at `0xA41721EE` and `0xA41722D2`; after a successful return,

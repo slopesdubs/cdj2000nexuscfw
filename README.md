@@ -18,9 +18,10 @@ dormant feature — the supporting code does not exist. A controlled comparison 
 the CDJ-2000NXS2 shows thirteen identical rekordbox analysis-tag entries and exactly two
 differences: `PWV4` and `PWV5`. See FINDINGS §1.
 
-**Partially solved:** MAIN waveform message IDs 4/5 and the normal message constructor
-are mapped. The exact PWV3/database-result staging edge into that constructor, the
-GUI-side receiver/renderer, and the NXS2 GUI segment compression remain unresolved.
+**Partially solved:** the complete PWV3 parser-to-MAIN/GUI-frame path is mapped. An
+offline emulator reproduces and validates the stock 896-byte detailed-waveform frames.
+The physical transport handoff, GUI-side receiver/renderer, and NXS2 GUI segment
+compression remain unresolved.
 
 **Untested:** everything, on hardware.
 
@@ -53,6 +54,7 @@ tools/
   anlz_color.py            PWV4/PWV5 parser + dependency-free PNG renderer
   cdj_lab.py               command-line entry point for the offline lab
   sh4_trace.py             read-only SH-4 tag/xref/data-flow report generator
+  nxs_wave_emulator.py     stock detailed-waveform frame encoder/reassembler
   ethernet_trace.py        read-only PCAP/PCAPNG waveform correlation scanner
   sh4dis.py                SH-4 disassembler (little-endian)
   bfindis.py               Blackfin disassembler (GUI processor)
@@ -95,6 +97,13 @@ python3 tools/cdj_lab.py trace-main \
   --objdump work/toolchain/sh-elf/bin/sh-elf-objdump \
   --anlz work/samples/ANLZ0000.EXT \
   --output work/analysis/pwv3
+```
+
+Emulate the stock detailed-waveform frame boundary with a real rekordbox EXT:
+
+```bash
+python3 tools/cdj_lab.py emulate-waveform work/samples/ANLZ0000.EXT \
+  --output work/analysis/nxs-wave-emulator
 ```
 
 Extract the MAIN processor image:
@@ -163,12 +172,12 @@ Keep untouched stock v1.44 on a USB stick at all times as the way back.
 
 ## Next steps
 
-1. Close the single static edge from the saved PWV3/database result into the GUI
-   builder's 36-byte source records.
-2. Make two phase-timed Ethernet captures with the same track and run the correlation
+1. Trace the emulated frame buffer through the final physical MAIN→GUI send handoff.
+2. Find the matching GUI-side frame receiver and reproduce its PWV3 decoding offline.
+3. Make two phase-timed Ethernet captures with the same track and run the correlation
    scanner. A negative result is useful and expected to be possible.
-3. Trace the NXS2 `PWV5` handler as a control and compare its output structure.
-4. Only after the trace phase, prove the stock/rebuild/recovery loop on sacrificial
+4. Trace the NXS2 `PWV5` handler as a control and compare its output structure.
+5. Only after the trace phase, prove the stock/rebuild/recovery loop on sacrificial
    hardware before any code injection or colour-waveform patch design.
 
 ## Licence

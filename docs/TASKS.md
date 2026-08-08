@@ -58,6 +58,10 @@ one-per-issue. Suggested labels in brackets.
       PWV3 payload. `dbcl_GetParWaveData` carries it to track object `+0x5A4`, and
       `0xA425BD60`/`0xA425C0CC` copy raw bytes into 896-byte detailed-waveform frames.
       `[analysis] [milestone]`
+- [x] **Build an offline NXS detailed-waveform emulator.** Generate, CRC-check and
+      reassemble the exact 896-byte stock frame envelope, including reusable-buffer
+      tail behavior. The canonical 29,804-byte PWV3 sample round-trips through 34
+      frames byte-identically. `[tooling] [milestone]`
 - [ ] **Confirm the final physical transport handoff.** Trace shared buffer
       `0x04985564` from the detailed-waveform scheduler through the generic send call
       into the actual MAIN→GUI SPORT/DMA serializer. The message format itself is

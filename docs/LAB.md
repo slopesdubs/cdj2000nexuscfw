@@ -103,7 +103,8 @@ python3 tools/cdj_lab.py render-anlz work/samples/ANLZ0000.EXT \
 
 - The visual mapping of `PWV4`'s luminance and two apparent height layers.
 - Symmetric waveform placement in the simulated 480-pixel canvas.
-- Any packet format for transporting colour columns from MAIN to GUI.
+- A compatible MAIN→GUI extension for transporting colour columns; the stock PWV3
+  frame envelope is verified, but colour transport does not exist in NXS v1.44.
 
 The current renderer is a test oracle for data plumbing, not a claim that its pixels
 match the Blackfin renderer. A real `.EXT` now parses and renders; a rekordbox/NXS2
@@ -162,6 +163,32 @@ three validators, the real PWV3 metadata handler, the database wave path, and th
 message constructors. These files are ignored because absolute paths and analysis of
 the user-supplied firmware may be embedded in them.
 
+## Emulate the NXS detailed-waveform boundary
+
+Generate the 896-byte frames produced by the stock MAIN constructors, validate every
+CRC, and reassemble them back to the original PWV3 bytes:
+
+```bash
+python3 tools/cdj_lab.py emulate-waveform work/samples/ANLZ0000.EXT \
+  --output work/analysis/nxs-wave-emulator
+```
+
+For the supplied 29,804-byte PWV3 payload this produces 34 frames: 880 payload bytes
+in frame 1 and up to 888 in each extension. `manifest.json` records each frame's CRC,
+payload span and SHA-256; `source-payload.bin` and `reassembled-payload.bin` must be
+byte-identical. The two opaque first-frame words at offsets 10 and 12 default to zero
+and can be supplied explicitly with `--header-word-10` and `--header-word-12`.
+
+The same verified envelope can carry PWV5 bytes as an **offline experiment**:
+
+```bash
+python3 tools/cdj_lab.py emulate-waveform work/samples/ANLZ0000.EXT \
+  --tag PWV5 --output work/analysis/nxs-wave-emulator-pwv5
+```
+
+This proves framing and byte preservation only. Stock NXS firmware has no PWV5 parser
+or colour renderer, so these experimental frames are not claimed to work on hardware.
+
 ## Ethernet hardware checkpoint
 
 Use an isolated CDJ-to-PC link. Ethernet is behavioral correlation only: USB ANLZ
@@ -202,7 +229,7 @@ Once real inputs are present:
 1. Run the test suite and both inspection commands.
 2. Render `PWV4` and compare it with rekordbox/NXS2 output for the same track.
 3. Record field-value ranges and correct the inferred preview mapping.
-4. Close the one static staging edge documented in FINDINGS §6b.
+4. Use the frame emulator as the test oracle while tracing the GUI-side receiver.
 5. Capture and scan two time-correlated Ethernet repetitions.
 6. Repeat the handler trace on NXS2 MAIN for `PWV5`, then compare its storage and GUI
    path before designing any patch.

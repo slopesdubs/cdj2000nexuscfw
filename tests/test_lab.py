@@ -21,6 +21,18 @@ from anlz_color import (  # noqa: E402
 )
 from lzss_codec import compress, decompress  # noqa: E402
 from ethernet_trace import compare_captures, scan_capture  # noqa: E402
+from nxs_wave_emulator import (  # noqa: E402
+    CRC_OFFSET,
+    EXTENSION_PAYLOAD_CAPACITY,
+    FIRST_PAYLOAD_CAPACITY,
+    FRAME_SIZE,
+    WaveEmulatorError,
+    emulate_anlz_file,
+    encode_detail_frames,
+    extract_waveform_source,
+    inspect_detail_frames,
+    reassemble_detail_frames,
+)
 from srec_parse import SRecError, parse_srec  # noqa: E402
 from sh4_trace import (  # noqa: E402
     FunctionRange,
@@ -187,6 +199,63 @@ class AnlzTests(unittest.TestCase):
         self.assertEqual(used, "PWV5")
         self.assertTrue(rendered.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertGreater(len(rendered), 100)
+
+
+class NxsWaveEmulatorTests(unittest.TestCase):
+    def test_real_size_pwv3_frame_round_trip(self):
+        payload = bytes(index & 0xFF for index in range(29_804))
+        frames = encode_detail_frames(payload, 0x1234, 0x5678)
+        information = inspect_detail_frames(frames)
+
+        self.assertEqual(len(frames), 34)
+        self.assertTrue(all(len(frame) == FRAME_SIZE for frame in frames))
+        self.assertTrue(all(item.crc_valid for item in information))
+        self.assertEqual(struct.unpack_from("<H", frames[0], 0)[0], 32)
+        self.assertEqual(struct.unpack_from("<I", frames[0], 2)[0], 1)
+        self.assertEqual(struct.unpack_from("<I", frames[0], 6)[0], len(payload))
+        self.assertEqual(struct.unpack_from("<HH", frames[0], 10), (0x1234, 0x5678))
+        self.assertEqual(information[0].payload_bytes, FIRST_PAYLOAD_CAPACITY)
+        self.assertEqual(information[1].payload_bytes, EXTENSION_PAYLOAD_CAPACITY)
+        self.assertEqual(reassemble_detail_frames(frames), payload)
+
+    def test_final_extension_retains_reusable_buffer_tail(self):
+        payload = bytes(index & 0xFF for index in range(880 + 888 + 10))
+        frames = encode_detail_frames(payload)
+        self.assertEqual(len(frames), 3)
+        previous_payload = frames[1][6:CRC_OFFSET]
+        final_payload_area = frames[2][6:CRC_OFFSET]
+        self.assertEqual(final_payload_area[:10], payload[-10:])
+        self.assertEqual(final_payload_area[10:], previous_payload[10:])
+        self.assertEqual(reassemble_detail_frames(frames), payload)
+
+    def test_corrupt_frame_is_rejected(self):
+        frames = encode_detail_frames(b"waveform" * 200)
+        damaged = list(frames)
+        frame = bytearray(damaged[1])
+        frame[20] ^= 0x80
+        damaged[1] = bytes(frame)
+        with self.assertRaisesRegex(WaveEmulatorError, "CRC mismatch"):
+            inspect_detail_frames(damaged)
+
+    def test_anlz_artifacts_are_byte_identical(self):
+        payload = bytes(range(64)) * 20
+        anlz = make_anlz(make_pwv3(payload))
+        source = extract_waveform_source(anlz)
+        self.assertEqual(source.payload, payload)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "ANLZ0000.EXT"
+            output = root / "emulated"
+            input_path.write_bytes(anlz)
+            manifest = emulate_anlz_file(input_path, output)
+            reassembled = (output / "reassembled-payload.bin").read_bytes()
+            manifest_on_disk = (output / "manifest.json").read_text("utf-8")
+
+        self.assertEqual(reassembled, payload)
+        self.assertTrue(manifest["verification"]["all_crc_valid"])
+        self.assertTrue(manifest["verification"]["byte_identical_round_trip"])
+        self.assertIn('"frame_size": 896', manifest_on_disk)
 
 
 class EthernetTraceTests(unittest.TestCase):

@@ -16,6 +16,7 @@ from anlz_color import (
     parse_pwv5,
     render_anlz_file,
 )
+from nxs_wave_emulator import WaveEmulatorError, emulate_anlz_file
 from sh4_trace import DEFAULT_BASE, build_trace, parse_int, write_trace_outputs
 from upd_container import (
     SEGMENT_NAMES,
@@ -162,6 +163,28 @@ def trace_main(args: argparse.Namespace) -> int:
     return 0
 
 
+def emulate_waveform(args: argparse.Namespace) -> int:
+    manifest = emulate_anlz_file(
+        args.path,
+        args.output,
+        args.tag,
+        args.header_word_10,
+        args.header_word_12,
+    )
+    source = manifest["source"]
+    verification = manifest["verification"]
+    print(
+        f"emulated {source['tag']}: {source['payload_bytes']} payload bytes -> "
+        f"{len(manifest['frames'])} x 896-byte frames"
+    )
+    print(
+        f"CRC={'OK' if verification['all_crc_valid'] else 'FAIL'}, "
+        f"round-trip={'byte-identical' if verification['byte_identical_round_trip'] else 'FAIL'}"
+    )
+    print(f"wrote frames and manifest to {args.output}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Offline inspection and colour-waveform lab for CDJ-2000NXS firmware"
@@ -200,6 +223,27 @@ def build_parser() -> argparse.ArgumentParser:
     trace.add_argument("--anlz", type=Path, help="optional real ANLZ/EXT positive control")
     trace.add_argument("--lookup-site", action="append", type=parse_int)
     trace.set_defaults(handler=trace_main)
+
+    emulate = commands.add_parser(
+        "emulate-waveform",
+        help="emulate stock NXS detailed-waveform MAIN-to-GUI frames",
+    )
+    emulate.add_argument("path", type=Path, help="rekordbox ANLZ0000.EXT input")
+    emulate.add_argument("--output", "-o", type=Path, required=True)
+    emulate.add_argument("--tag", choices=("PWV3", "PWV5"), default="PWV3")
+    emulate.add_argument(
+        "--header-word-10",
+        type=parse_int,
+        default=0,
+        help="opaque first-frame 16-bit word at offset 10 (default: 0)",
+    )
+    emulate.add_argument(
+        "--header-word-12",
+        type=parse_int,
+        default=0,
+        help="opaque first-frame 16-bit word at offset 12 (default: 0)",
+    )
+    emulate.set_defaults(handler=emulate_waveform)
     return parser
 
 
@@ -208,7 +252,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
-    except (OSError, UpdError, AnlzError, ValueError) as exc:
+    except (OSError, UpdError, AnlzError, WaveEmulatorError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
