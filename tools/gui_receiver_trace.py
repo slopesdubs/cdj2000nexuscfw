@@ -19,6 +19,17 @@ CODE_BASE = 0x00C60000
 CODE_LIMIT = 0x00D50000
 ZEROFILL = 0x0001
 FINAL = 0x8000
+PALETTE_ADDRESS = 0x00CD3928
+EXPECTED_RGB555_PALETTE = (
+    0x0993,
+    0x0A17,
+    0x065F,
+    0x0AFD,
+    0x3F1C,
+    0x4B1F,
+    0x4B1F,
+    0x6BBF,
+)
 
 
 class GuiTraceError(ValueError):
@@ -40,6 +51,9 @@ FOCUSED_RANGES: Sequence[Tuple[str, int, int]] = (
     ("detail-command-20", 0x00D0FA64, 0x00D0FE00),
     ("completion-event", 0x00D0F358, 0x00D0F540),
     ("column-consumer", 0x00D2F51C, 0x00D2F60E),
+    ("rgb555-packer", 0x00D2C052, 0x00D2C06A),
+    ("column-renderer", 0x00D2E17C, 0x00D2E34E),
+    ("waveform-surface", 0x00D2F0BE, 0x00D2F51C),
 )
 
 
@@ -137,6 +151,29 @@ def _validate_disassembly(disassembly: Dict[str, str]) -> None:
             "R6=0x1f",
             "P0=0x1011940",
         ),
+        "rgb555-packer": (
+            "d2c052:",
+            "R0 >>= 0x3",
+            "R0 <<= 0xa",
+            "R1 <<= 0x5",
+        ),
+        "column-renderer": (
+            "d2e230:",
+            "CALL 0x0xd2e17c",
+            "CALL 0x0xd2e1e8",
+            "P0=0x1011940",
+            "P2=0xcd3928",
+            "W[P5 ++ P1] = R0.L",
+        ),
+        "waveform-surface": (
+            "d2f0be:",
+            "CALL 0x0xd2e230",
+            "d2f418:",
+            "R6=0x320",
+            "BITSET (R0, 0x10)",
+            "R0=0x5a0190",
+            "R2=0x1000000",
+        ),
     }
     missing = [
         f"{name}: {needle}"
@@ -174,6 +211,19 @@ def build_gui_receiver_trace(gui_path: Path, objdump_path: Path) -> Tuple[dict, 
             for name, start, stop in FOCUSED_RANGES
         }
     _validate_disassembly(focused)
+    palette = tuple(
+        struct.unpack_from("<H", image, PALETTE_ADDRESS - CODE_BASE + index * 4)[0]
+        for index in range(8)
+    )
+    palette_padding = tuple(
+        struct.unpack_from("<H", image, PALETTE_ADDRESS - CODE_BASE + index * 4 + 2)[0]
+        for index in range(8)
+    )
+    if palette != EXPECTED_RGB555_PALETTE or any(palette_padding):
+        raise GuiTraceError(
+            "stock palette validation failed: "
+            + ", ".join(f"0x{value:04X}" for value in palette)
+        )
 
     trace = {
         "schema": 1,
@@ -237,14 +287,42 @@ def build_gui_receiver_trace(gui_path: Path, objdump_path: Path) -> Tuple[dict, 
                 "the byte loop; the clamp bounds are not statically initialized."
             ),
         },
+        "renderer": {
+            "height_accessor": "0x00D2E17C",
+            "legacy_color_accessor": "0x00D2E1E8",
+            "column_renderer": "0x00D2E230",
+            "renderer_call_sites": ["0x00D2F3B6", "0x00D2F3D8"],
+            "palette_lookup": "0x00D2E2B8-0x00D2E2BE",
+            "palette_address": f"0x{PALETTE_ADDRESS:08X}",
+            "palette_entry_stride": 4,
+            "palette_rgb555": [f"0x{value:04X}" for value in palette],
+            "palette_padding_words": list(palette_padding),
+            "rgb_packer": "0x00D2C052",
+            "rgb_packer_formula": (
+                "((red >> 3) << 10) | ((green >> 3) << 5) | (blue >> 3)"
+            ),
+            "pixel_format": "RGB555 stored as a little-endian 16-bit word",
+            "surface_setup": "0x00D2F418",
+            "surface_address": "0x01000000",
+            "surface_dimensions": {"width": 400, "height": 90},
+            "surface_row_bytes": 800,
+            "surface_bytes": 72000,
+            "waveform_baseline_address": "0x01008980",
+            "vertical_row_step": -800,
+            "maximum_height_pixels": 31,
+            "registration": "0x00D2F4F8 calls 0x00D02600",
+            "activation": "0x00D2F502 calls 0x00D02A48",
+        },
         "boundary": {
             "proven": (
                 "MAIN command-32 frame bytes -> SPORT1/DMA3 -> CRC gate -> command "
-                "dispatch -> reassembly -> completion event -> legacy PWV3 columns"
+                "dispatch -> reassembly -> completion event -> legacy PWV3 columns "
+                "-> palette lookup -> RGB555 waveform-layer pixels"
             ),
             "unresolved": (
-                "The next indirect drawing call that turns the 12-byte column records "
-                "into RGB565 framebuffer pixels."
+                "Only the generic graphics compositor edge from the registered "
+                "0x01000000 layer surface to DMA0 scanout at 0x00659B88 remains; "
+                "the waveform colour-rendering boundary itself is proven."
             ),
         },
     }
@@ -256,6 +334,7 @@ def _markdown(trace: dict) -> str:
     t = trace["transport"]
     r = trace["receiver"]
     c = trace["consumer"]
+    renderer = trace["renderer"]
     return "\n".join(
         [
             "# Stock v1.44 GUI detailed-waveform receiver trace",
@@ -271,8 +350,11 @@ def _markdown(trace: dict) -> str:
             f"- Reassembly lands at `{r['reassembly_buffer']}`.",
             f"- Completion event `{c['completion_event']}` reaches `{c['first_consumer']}`.",
             f"- Each PWV3 byte becomes `height = {c['height']}` and `legacy_colour = {c['legacy_color_code']}` in a {c['record_stride']}-byte record at `{c['destination_base']}`.",
+            f"- `{renderer['column_renderer']}` reads those fields and indexes the eight-entry palette at `{renderer['palette_address']}`.",
+            f"- The selected {renderer['pixel_format']} is written into the {renderer['surface_dimensions']['width']}×{renderer['surface_dimensions']['height']} layer at `{renderer['surface_address']}` with a {renderer['surface_row_bytes']}-byte row stride.",
+            f"- The vertical waveform baseline is `{renderer['waveform_baseline_address']}`; columns extend upward by at most {renderer['maximum_height_pixels']} pixels.",
             "",
-            "## Remaining edge",
+            "## Remaining generic compositor edge",
             "",
             trace["boundary"]["unresolved"],
             "",

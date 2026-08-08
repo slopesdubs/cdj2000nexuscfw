@@ -94,10 +94,10 @@ one-per-issue. Suggested labels in brackets.
 - [x] **Decode the detailed-waveform MAIN↔GUI protocol.** The raw PWV3 constructors,
       SPORT1/DMA3 ingress, CRC gate, command-32 receiver, reassembly, completion event,
       and first one-byte-to-12-byte column transform are all mapped. `[analysis]`
-- [ ] **Find the final GUI waveform renderer.** Follow the 12-byte records at
-      `0x01011940` through the indirect drawing call to framebuffer `0x00659B88`.
-      Inter-procedural pointer tracking or a hardware watchpoint may still help.
-      `[analysis] [instrumentation]`
+- [x] **Find the final GUI waveform renderer.** `0x00D2E230` reads the height and
+      three-bit palette index from records at `0x01011940`, selects an RGB555 word at
+      `0x00CD3928`, and writes it vertically into the 400×90 layer at `0x01000000`.
+      The generic layer-to-DMA compositor remains separate cleanup. `[analysis]`
 - [ ] **Crack the NXS2 GUI segment compression** (ADI "compressed streams"). The one
       remaining unknown in the container format. Not on the critical path.
       `[analysis] [low-priority]`
@@ -106,6 +106,8 @@ one-per-issue. Suggested labels in brackets.
 
 - [ ] Add `PWV4`/`PWV5` parser entries and handlers on SH-4.
 - [ ] Extend the MAIN→GUI protocol to carry per-column colour.
+- [ ] Prototype a parallel RGB555-per-column buffer and redirect `0x00D2E230`'s
+      palette load to it; avoid widening the shared 12-byte record initially.
 - [ ] Blackfin toolchain + colour rendering on the GUI processor.
 
 ## Standing / anytime

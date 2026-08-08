@@ -27,6 +27,7 @@ from nxs_wave_emulator import (  # noqa: E402
     EXTENSION_PAYLOAD_CAPACITY,
     FIRST_PAYLOAD_CAPACITY,
     FRAME_SIZE,
+    LEGACY_RGB555_PALETTE,
     WaveEmulatorError,
     decode_gui_wave_columns,
     emulate_anlz_file,
@@ -35,7 +36,10 @@ from nxs_wave_emulator import (  # noqa: E402
     extract_waveform_source,
     inspect_detail_frames,
     pack_gui_wave_records,
+    pack_gui_column_colors,
     reassemble_detail_frames,
+    rgb555_to_rgb888,
+    rgb888_to_rgb555,
 )
 from srec_parse import SRecError, parse_srec  # noqa: E402
 from sh4_trace import (  # noqa: E402
@@ -250,6 +254,7 @@ class NxsWaveEmulatorTests(unittest.TestCase):
             [(29, 5), (3, 2), (31, 7)],
         )
         self.assertEqual(result.columns[0].packed_word, 0x051D)
+        self.assertEqual(result.columns[0].rgb555, LEGACY_RGB555_PALETTE[5])
         self.assertEqual(result.records, pack_gui_wave_records(payload))
         self.assertEqual(result.records[:3], b"\x1D\x05\x00")
         self.assertEqual(len(result.records), len(payload) * 12)
@@ -258,6 +263,20 @@ class NxsWaveEmulatorTests(unittest.TestCase):
         columns = decode_gui_wave_columns(bytes(range(256)))
         self.assertEqual({column.height for column in columns}, set(range(32)))
         self.assertEqual({column.color_code for column in columns}, set(range(8)))
+        self.assertEqual({column.rgb555 for column in columns}, set(LEGACY_RGB555_PALETTE))
+
+    def test_verified_gui_rgb555_palette_and_packer(self):
+        payload = bytes(code << 5 for code in range(8))
+        colors = pack_gui_column_colors(payload)
+        self.assertEqual(
+            struct.unpack("<8H", colors),
+            LEGACY_RGB555_PALETTE,
+        )
+        self.assertEqual(rgb888_to_rgb555(255, 255, 255), 0x7FFF)
+        self.assertEqual(rgb888_to_rgb555(255, 0, 0), 0x7C00)
+        self.assertEqual(rgb555_to_rgb888(0x7FFF), (255, 255, 255))
+        with self.assertRaises(WaveEmulatorError):
+            rgb888_to_rgb555(256, 0, 0)
 
     def test_anlz_artifacts_are_byte_identical(self):
         payload = bytes(range(64)) * 20
@@ -273,6 +292,7 @@ class NxsWaveEmulatorTests(unittest.TestCase):
             manifest = emulate_anlz_file(input_path, output)
             reassembled = (output / "reassembled-payload.bin").read_bytes()
             gui_record_size = (output / "gui-column-records.bin").stat().st_size
+            gui_color_size = (output / "gui-column-colors-rgb555.bin").stat().st_size
             manifest_on_disk = (output / "manifest.json").read_text("utf-8")
 
         self.assertEqual(reassembled, payload)
@@ -280,6 +300,11 @@ class NxsWaveEmulatorTests(unittest.TestCase):
         self.assertTrue(manifest["verification"]["byte_identical_round_trip"])
         self.assertEqual(manifest["gui_receiver"]["first_consumer"], "0x00D2F51C")
         self.assertEqual(gui_record_size, len(payload) * 12)
+        self.assertEqual(gui_color_size, len(payload) * 2)
+        self.assertEqual(
+            manifest["gui_receiver"]["renderer"]["pixel_format"],
+            "RGB555, little-endian 16-bit storage",
+        )
         self.assertIn('"frame_size": 896', manifest_on_disk)
 
 

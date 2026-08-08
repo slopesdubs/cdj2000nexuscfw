@@ -192,6 +192,12 @@ def emulate_waveform(args: argparse.Namespace) -> int:
         f"records={gui['column_transform']['converted_records']} x "
         f"{gui['column_transform']['record_stride']} bytes"
     )
+    renderer = gui["renderer"]
+    print(
+        f"renderer={renderer['column_renderer']}, "
+        f"pixels={renderer['pixel_format']}, "
+        f"surface={renderer['surface_width']}x{renderer['surface_height']}"
+    )
     print(f"wrote frames and manifest to {args.output}")
     return 0
 
@@ -201,9 +207,11 @@ def trace_gui(args: argparse.Namespace) -> int:
     write_gui_receiver_trace(trace, disassemblies, args.output)
     receiver = trace["receiver"]
     consumer = trace["consumer"]
+    renderer = trace["renderer"]
     print(
         f"verified GUI command {receiver['message_word']} receiver "
-        f"{receiver['handler']} -> {consumer['first_consumer']}"
+        f"{receiver['handler']} -> {consumer['first_consumer']} -> "
+        f"renderer {renderer['column_renderer']}"
     )
     print(f"wrote GUI receiver trace to {args.output}")
     return 0

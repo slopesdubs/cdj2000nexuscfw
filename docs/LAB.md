@@ -201,10 +201,20 @@ python3 tools/cdj_lab.py trace-gui \
 
 The command hash-gates the GUI segment, parses its LDR blocks, disassembles the
 SPORT1/DMA3 ingress, command-32 reassembler, event dispatch, and first column consumer,
-then writes JSON, Markdown, and focused disassemblies. `emulate-waveform` now also
-writes `gui-column-records.bin`: an exhaustive offline set of 12-byte records whose
-word at `+0` is `(legacy_colour << 8) | height`. Live firmware can clamp the converted
-entry count using runtime display state; the file is a deterministic analysis model.
+then writes JSON, Markdown, and focused disassemblies. The trace continues through
+height/colour accessors, renderer `0x00D2E230`, the palette at `0x00CD3928`, and the
+400×90 RGB555 waveform layer at `0x01000000`.
+
+`emulate-waveform` also writes two deterministic analysis files:
+
+- `gui-column-records.bin`: 12-byte records whose word at `+0` is
+  `(legacy_colour << 8) | height`.
+- `gui-column-colors-rgb555.bin`: the little-endian RGB555 palette word selected for
+  every input byte.
+
+Live firmware can clamp the converted entry count and visible columns using runtime
+display state, so these files exhaustively model the verified per-column transforms,
+not a particular on-screen viewport.
 
 ## Ethernet hardware checkpoint
 
@@ -246,7 +256,8 @@ Once real inputs are present:
 1. Run the test suite and both inspection commands.
 2. Render `PWV4` and compare it with rekordbox/NXS2 output for the same track.
 3. Record field-value ranges and correct the inferred preview mapping.
-4. Trace the verified 12-byte GUI records into the indirect RGB565 drawing call.
+4. Use the verified RGB555 write seam to prototype a separate per-column colour
+   buffer; keep runtime viewport/compositor behavior outside the first prototype.
 5. Capture and scan two time-correlated Ethernet repetitions.
 6. Repeat the handler trace on NXS2 MAIN for `PWV5`, then compare its storage and GUI
    path before designing any patch.

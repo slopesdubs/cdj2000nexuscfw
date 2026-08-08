@@ -7,9 +7,10 @@ the first 894 bytes is stored little-endian in the final two bytes.
 
 The stock Blackfin receiver at 0x00D0FA64 reassembles those frames into
 0x01A65168.  Its first consumer at 0x00D2F51C splits every PWV3 byte into a
-five-bit height and three-bit legacy colour code.  This module also models
-that receiver boundary and per-column transform.  It does not emulate either
-CPU, the physical SPORT/DMA link, or pixel rendering.
+five-bit height and three-bit legacy colour code.  The column renderer at
+0x00D2E230 uses that code to select an RGB555 word from the palette at
+0x00CD3928.  This module models both verified transforms.  It does not emulate
+either CPU, the physical SPORT/DMA link, or the runtime viewport/compositor.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 from anlz_color import AnlzError, parse_anlz
 from upd_build import crc_xmodem
@@ -33,6 +34,19 @@ FIRST_HEADER_SIZE = 14
 FIRST_PAYLOAD_CAPACITY = CRC_OFFSET - FIRST_HEADER_SIZE
 EXTENSION_HEADER_SIZE = 6
 EXTENSION_PAYLOAD_CAPACITY = CRC_OFFSET - EXTENSION_HEADER_SIZE
+
+# Low 16-bit words from the eight four-byte entries at GUI address 0x00CD3928.
+# 0x00D2E230 indexes this table with the three-bit PWV3 colour code.
+LEGACY_RGB555_PALETTE = (
+    0x0993,
+    0x0A17,
+    0x065F,
+    0x0AFD,
+    0x3F1C,
+    0x4B1F,
+    0x4B1F,
+    0x6BBF,
+)
 
 
 class WaveEmulatorError(ValueError):
@@ -70,6 +84,7 @@ class GuiWaveColumn:
     height: int
     color_code: int
     packed_word: int
+    rgb555: int
 
 
 @dataclass(frozen=True)
@@ -249,7 +264,8 @@ def decode_gui_wave_columns(payload: bytes) -> List[GuiWaveColumn]:
     The Blackfin stores ``height`` in the low byte and the three-bit colour
     code in the high byte of a 16-bit value. Runtime code writes those words
     to 12-byte records; this function returns the semantic fields without
-    inventing meanings for the eight possible legacy colour codes.
+    inventing meanings for the eight possible legacy colour codes. The final
+    field reproduces the renderer's direct palette lookup at 0x00D2E230.
     """
 
     return [
@@ -258,9 +274,35 @@ def decode_gui_wave_columns(payload: bytes) -> List[GuiWaveColumn]:
             height=value & 0x1F,
             color_code=(value & 0xE0) >> 5,
             packed_word=(((value & 0xE0) >> 5) << 8) | (value & 0x1F),
+            rgb555=LEGACY_RGB555_PALETTE[(value & 0xE0) >> 5],
         )
         for value in payload
     ]
+
+
+def rgb888_to_rgb555(red: int, green: int, blue: int) -> int:
+    """Reproduce GUI routine 0x00D2C052's 8-bit RGB to 5:5:5 packer."""
+
+    if any(not 0 <= component <= 0xFF for component in (red, green, blue)):
+        raise WaveEmulatorError("RGB components must be in the range 0..255")
+    return ((red >> 3) << 10) | ((green >> 3) << 5) | (blue >> 3)
+
+
+def rgb555_to_rgb888(value: int) -> Tuple[int, int, int]:
+    """Expand a stock 15-bit pixel to displayable 8-bit RGB components."""
+
+    if not 0 <= value <= 0x7FFF:
+        raise WaveEmulatorError("RGB555 value must be in the range 0x0000..0x7FFF")
+    components = ((value >> 10) & 0x1F, (value >> 5) & 0x1F, value & 0x1F)
+    return tuple((component << 3) | (component >> 2) for component in components)
+
+
+def pack_gui_column_colors(payload: bytes) -> bytes:
+    """Pack the renderer palette word selected for every PWV3 input byte."""
+
+    return b"".join(
+        struct.pack("<H", LEGACY_RGB555_PALETTE[value >> 5]) for value in payload
+    )
 
 
 def pack_gui_wave_records(payload: bytes) -> bytes:
@@ -327,12 +369,14 @@ def emulate_anlz_file(
     gui_columns = gui_result.columns
     gui_records = gui_result.records
     (output_directory / "gui-column-records.bin").write_bytes(gui_records)
+    gui_colors = pack_gui_column_colors(reassembled)
+    (output_directory / "gui-column-colors-rgb555.bin").write_bytes(gui_colors)
     payload_digest = hashlib.sha256(source.payload).hexdigest()
     manifest = {
         "schema": 1,
         "emulator_scope": (
             "stock NXS detailed-waveform MAIN frame construction through the "
-            "first verified GUI per-column consumer"
+            "verified GUI per-column record and RGB555 palette transforms"
         ),
         "source": {
             "path": str(source_path.resolve()),
@@ -389,6 +433,30 @@ def emulate_anlz_file(
                     "the count using runtime display state; experimental PWV5 input "
                     "is still consumed one byte at a time and therefore becomes two "
                     "legacy records per real PWV5 column, not RGB"
+                ),
+            },
+            "renderer": {
+                "column_renderer": "0x00D2E230",
+                "height_accessor": "0x00D2E17C",
+                "color_accessor": "0x00D2E1E8",
+                "palette_address": "0x00CD3928",
+                "palette_rgb555": [f"0x{value:04X}" for value in LEGACY_RGB555_PALETTE],
+                "rgb_packer": "0x00D2C052",
+                "rgb_packer_formula": "(red >> 3) << 10 | (green >> 3) << 5 | blue >> 3",
+                "pixel_format": "RGB555, little-endian 16-bit storage",
+                "surface_address": "0x01000000",
+                "surface_width": 400,
+                "surface_height": 90,
+                "row_bytes": 800,
+                "surface_bytes": 72000,
+                "waveform_baseline_address": "0x01008980",
+                "vertical_row_step": -800,
+                "maximum_height_pixels": 31,
+                "offline_color_file": "gui-column-colors-rgb555.bin",
+                "offline_color_sha256": hashlib.sha256(gui_colors).hexdigest(),
+                "note": (
+                    "one RGB555 palette word is emitted per input byte; runtime "
+                    "viewport selection and compositing are intentionally omitted"
                 ),
             },
         },

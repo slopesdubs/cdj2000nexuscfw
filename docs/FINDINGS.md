@@ -294,10 +294,36 @@ one byte per record. The live conversion count is clamped through runtime displa
 state before the loop, so the exhaustive offline record image is a model rather than
 a claim that every record is always converted in one call.
 
-The remaining edge is narrower: find the indirect drawing call that converts these
-12-byte records to RGB565 framebuffer pixels at `0x00659B88`. A previous constant-only
-dataflow scan could not see computed framebuffer addresses; inter-procedural pointer
-tracking or a hardware watchpoint remains appropriate.
+**Verified renderer:** height accessor `0x00D2E17C` and colour accessor `0x00D2E1E8`
+feed column renderer `0x00D2E230`, called at `0x00D2F3B6` and `0x00D2F3D8`. The
+renderer uses the three-bit colour code as an index into eight four-byte entries at
+`0x00CD3928`, then loads the low 16-bit palette word:
+
+```text
+index:   0      1      2      3      4      5      6      7
+RGB555: 0993   0A17   065F   0AFD   3F1C   4B1F   4B1F   6BBF
+```
+
+Routine `0x00D2C052` independently proves the pixel format by packing 8-bit channels
+as `((R >> 3) << 10) | ((G >> 3) << 5) | (B >> 3)`: **RGB555**, not RGB565.
+Renderer writes begin at `0x01008980`, row 44 of a 400×90, 16-bit off-screen surface
+at `0x01000000`; its row stride is 800 bytes and each column extends upward by at most
+31 pixels. Surface setup `0x00D2F418` registers that 72,000-byte layer through
+`0x00D02600` and activates it through `0x00D02A48`.
+
+This closes the waveform-specific chain:
+
+```text
+raw PWV3 -> 12-byte record -> height + 3-bit palette index
+         -> palette word -> RGB555 waveform-layer pixels
+```
+
+The remaining unresolved edge is generic graphics plumbing from the registered layer
+at `0x01000000` to DMA0 scanout storage at `0x00659B88`. It is no longer a blocker for
+designing the colour-waveform data path. The limiting fact is now concrete: the stock
+record and renderer carry one of eight palette indices, whereas PWV5 needs three
+independent colour components. A parallel RGB555-per-column buffer is the least
+invasive first design to test; widening the 12-byte record would affect more consumers.
 
 ---
 

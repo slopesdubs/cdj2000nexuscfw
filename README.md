@@ -18,10 +18,11 @@ dormant feature — the supporting code does not exist. A controlled comparison 
 the CDJ-2000NXS2 shows thirteen identical rekordbox analysis-tag entries and exactly two
 differences: `PWV4` and `PWV5`. See FINDINGS §1.
 
-**Partially solved:** the complete PWV3 parser-to-GUI-consumer path is mapped. An
-offline emulator reproduces the stock 896-byte frames, Blackfin reassembly, and the
-first per-column GUI transform. The final record-to-framebuffer renderer and NXS2 GUI
-segment compression remain unresolved.
+**Solved to the waveform layer:** the complete stock PWV3 parser-to-GUI-renderer path
+is mapped. An offline emulator reproduces the 896-byte frames, Blackfin reassembly,
+12-byte column records, palette lookup, and RGB555 colour selected for every column.
+Only the generic layer-to-DMA compositor and NXS2 GUI segment compression remain
+unresolved; neither obscures the stock waveform colour seam.
 
 **Untested:** everything, on hardware.
 
@@ -182,7 +183,8 @@ Keep untouched stock v1.44 on a USB stick at all times as the way back.
 
 ## Next steps
 
-1. Trace the 12-byte Blackfin column records into the indirect RGB565 drawing call.
+1. Prototype a parallel RGB555 column buffer so true PWV5 colour can reach the proven
+   palette-write seam without changing every 12-byte-record consumer.
 2. Crack or bypass the NXS2 compressed GUI stream and compare its PWV5 receiver and
    per-column structure as the colour positive control.
 3. Make two phase-timed Ethernet captures with the same track and run the correlation
