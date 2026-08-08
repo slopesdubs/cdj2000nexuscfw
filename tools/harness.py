@@ -1,22 +1,28 @@
 """Shared harness: load NXS GUI LDR image, decode ranges, run dataflow queries."""
-import struct, sys
-sys.path.insert(0, '/home/claude/work')
+import struct
+import sys
+from pathlib import Path
+
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
 from bfindis import decode
 import dataflow
+from upd_container import parse_upd
 
 ZEROFILL = 0x0001
 FINAL = 0x8000
 
 
-def load_gui(path='/home/claude/work/C2KNXS.UPD'):
-    data = open(path, 'rb').read()
-    sizes = {'GUI': 2015268, 'DRIV': 388690, 'MAIN': 7062204, 'PANL': 98888}
-    off = 33
-    segs = {}
-    for nm in ['GUI', 'DRIV', 'MAIN', 'PANL']:
-        segs[nm] = data[off:off + sizes[nm]]
-        off += sizes[nm]
-    return segs['GUI']
+def load_gui(path=None):
+    """Load the GUI segment from an NXS update file.
+
+    ``path`` is explicit by design; the current directory fallback is retained for
+    interactive compatibility with the original analysis notebooks.
+    """
+    update_path = Path(path) if path is not None else Path.cwd() / 'C2KNXS.UPD'
+    return parse_upd(update_path.read_bytes()).segments['GUI']
 
 
 def parse_ranges(gui):
@@ -63,9 +69,9 @@ def decode_range(gui, fs, fe, base_addr):
     return insns
 
 
-def find_accesses(lo, hi, progress=False):
+def find_accesses(lo, hi, progress=False, path=None):
     """Return every dataflow-resolved access landing in [lo,hi)."""
-    gui = load_gui()
+    gui = load_gui(path)
     ranges, mem = parse_ranges(gui)
     results = []
     for idx, (fs, fe, base_addr) in enumerate(ranges):

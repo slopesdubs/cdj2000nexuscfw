@@ -1,13 +1,13 @@
 # SH-4 Cross-Toolchain Setup — CDJ-2000NXS
 
-Purpose: be able to compile code that the CDJ's MAIN processor (Renesas SH7764,
-SH-4A core, **little-endian**) will execute, and place it into free space in the
-decompressed firmware image.
+Purpose: provide an authoritative GNU decoder for the CDJ's MAIN processor (Renesas
+SH7764, SH-4A core, **little-endian**), and later compile code for it if patch work is
+separately authorized.
 
-> These instructions were written from knowledge, not tested in this environment
-> (no network access here). Expect to adapt version numbers and paths. The
-> verification step in §5 is the part that actually matters — it proves the
-> toolchain matches the firmware regardless of how you got there.
+The binutils-only route below was run successfully on 2026-08-08. It installs GNU
+binutils 2.45.1 under ignored `work/toolchain/sh-elf/`; it does not build GCC, Newlib,
+KallistiOS, or the unrelated ARM/AICA toolchain. The KallistiOS source is pinned to
+commit `6cfcd74010fe6928431a233db399c5a28317ecf0`.
 
 ---
 
@@ -21,7 +21,21 @@ to a working `sh-elf-gcc`.
 You do **not** need the Dreamcast libraries or KallistiOS itself — only the compiler,
 assembler and linker it builds.
 
-## 2. Recommended route — KallistiOS `dc-chain`
+## 2. Reproduced route — KallistiOS `kos-chain`
+
+For the static trace, build only binutils:
+
+```bash
+./scripts/build-sh4-binutils.sh
+work/toolchain/sh-elf/bin/sh-elf-objdump --version
+```
+
+The script requires `curl`, `make`, a C/C++ compiler, and standard build tools. If
+`makeinfo` is absent, it repeats the configured build with generated manuals disabled.
+It copies the KallistiOS `utils/kos-chain` directory to a no-space temporary path
+because the upstream configure recipe does not quote installation prefixes.
+
+The equivalent full-toolchain route, which is not needed for tracing, is:
 
 ```bash
 # prerequisites (Debian/Ubuntu)
@@ -29,17 +43,18 @@ sudo apt install build-essential texinfo libgmp-dev libmpfr-dev libmpc-dev \
                  libisl-dev wget patch bzip2 gawk libjpeg-dev libpng-dev
 
 git clone https://github.com/KallistiOS/KallistiOS.git
-cd KallistiOS/utils/dc-chain
+cd KallistiOS/utils/kos-chain
 
-cp config.mk.stable.sample config.mk
-# Edit config.mk: you only need the SH build, so disable the ARM (AICA) target
-# to halve the build time.
+cp Makefile.dreamcast.cfg Makefile.cfg
+# Keep platform=dreamcast and toolchain_profile=stable.
+# Set toolchain_path to the desired sh-elf prefix.
 
 make          # expect 20-60 minutes
 ```
 
-Result: `sh-elf-gcc`, `sh-elf-as`, `sh-elf-ld`, `sh-elf-objcopy`, `sh-elf-objdump`,
-typically under `/opt/toolchains/dc/sh-elf/bin`. Add that to `PATH`.
+Result: `sh-elf-gcc`, `sh-elf-as`, `sh-elf-ld`, `sh-elf-objcopy`, `sh-elf-objdump`.
+The project script intentionally stops after installing binutils; it does not build
+`sh-elf-gcc`.
 
 ## 3. Alternatives
 
@@ -89,7 +104,7 @@ sh-elf-gcc -ml -m4-nofpu -ffreestanding -nostdlib -nostartfiles -fno-builtin -Os
 sh-elf-objcopy -O binary patch.elf patch.bin
 ```
 
-## 5. Verification — do this before writing any patch
+## 5. Verification — completed for the trace baseline
 
 The toolchain is only useful if it produces code matching the firmware's actual
 conventions. There is a free, decisive test available: **disassemble the real firmware
@@ -117,6 +132,22 @@ second, unrelated disassembler.
 
 This also cross-checks `tools/sh4dis.py` — if the two disassemblers agree on the same
 bytes, both are probably right.
+
+For the decompressed v1.44 image, the reproducible trace performs a stronger focused
+check against the known four-byte comparison routine at `0xA4388E5C`:
+
+```bash
+python3 tools/cdj_lab.py trace-main \
+  work/unpacked/nxs-stock/MAIN_decomp.bin \
+  --objdump work/toolchain/sh-elf/bin/sh-elf-objdump \
+  --anlz work/samples/ANLZ0000.EXT \
+  --output work/analysis/pwv3
+```
+
+**Verified:** GNU reconstructs the byte loop, length test, return, and byte subtraction;
+all four known `PWV3` literal loads resolve to that routine with comparison length 4.
+The generated disassembly and JSON/Markdown reports are kept under ignored
+`work/analysis/pwv3/`.
 
 ## 6. Where injected code can live
 

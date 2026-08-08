@@ -5,6 +5,22 @@ one-per-issue. Suggested labels in brackets.
 
 ---
 
+## Phase 0 — offline lab
+
+- [x] **Make analysis tools import-safe and location-independent.** Remove the
+      original `/home/claude/work` assumptions and firmware I/O during module import.
+      `[tooling]`
+- [x] **Add strict offline inspection.** Validate `.UPD` lengths, segment CRCs,
+      S-record checksums, MAIN byte-sum and LZSS decompression. `[tooling]`
+- [x] **Add `PWV4`/`PWV5` parsing and PNG rendering.** Synthetic tests pass; real
+      `.EXT` comparison is still required. `[tooling] [inferred]`
+- [ ] **Validate the lab with real inputs.** Run against user-supplied stock firmware
+      and an RGB-enabled rekordbox `.EXT`, then compare the PNG with rekordbox/NXS2.
+      Firmware and `.EXT` structure now pass; the same-track screenshot comparison is
+      still outstanding. `[analysis] [blocker]`
+
+---
+
 ## Phase 1 — prove the flash pipeline (needs sacrificial deck)
 
 - [ ] **Acquire a sacrificial CDJ-2000NXS.** Confirm it powers on and boots before
@@ -24,10 +40,27 @@ one-per-issue. Suggested labels in brackets.
       header layout is inferred, not verified. Confirms or refutes that reading.
       `[hardware] [unverified]`
 
-## Phase 2 — code injection
+## Phase 2 — targeted PWV3 trace (no firmware changes)
 
-- [ ] **Build the SH-4 toolchain.** See `docs/TOOLCHAIN.md`. Verify by disassembling
-      stock firmware and matching FINDINGS §5. `[toolchain]`
+- [x] **Build project-local GNU SH-4 binutils.** KallistiOS stable Dreamcast profile,
+      binutils 2.45.1; validate `0xA4388E5C` and all four lookup sites. `[toolchain]`
+- [x] **Map validators, callers, and generic dispatch.** Three validator functions,
+      their wrappers/request IDs, the 12-entry tag table, classifier, and dedicated
+      PWV3 branch are recorded in FINDINGS §6b. `[analysis]`
+- [x] **Recover PWV3 metadata storage.** The 24-byte owner descriptor and real EXT
+      sizes are proven; indexing advances over the payload rather than allocating or
+      copying it. `[analysis]`
+- [x] **Locate a downstream data path and GUI constructor.** The named database wave
+      retrieval and normal/clear GUI waveform builders are mapped. Message 5 contains
+      transformed 16-bit words, not raw PWV3. `[analysis]`
+- [ ] **Close the single staging edge.** Prove the transfer from the retained PWV3
+      locator/900-byte database result into the 36-byte records consumed by
+      `0xA4260D94`. `[analysis] [blocker]`
+- [ ] **Capture Ethernet twice.** Same track and phase timeline; scan both PCAPs with
+      `tools/ethernet_trace.py`. A repeated absence is still evidence. `[hardware]`
+
+## Phase 3 — code injection (deferred until trace completion)
+
 - [ ] **Write a build script** that takes a decompressed image + a patch blob + a hook
       address and emits a flashable `.UPD`. Wraps `lzss_codec` and `upd_build`.
       `[tooling]`
@@ -37,7 +70,7 @@ one-per-issue. Suggested labels in brackets.
 - [ ] **Make it observable.** Something visibly different on screen, so success is
       distinguishable from "didn't crash". `[hardware]`
 
-## Phase 3 — the unknowns
+## Phase 4 — the remaining unknowns
 
 - [ ] **Chase the serial debug console.** FINDINGS §8c: `232C Mode Change`,
       `phy debug command (usage: phy <r|w|s|l>)`, `diag_ether`. Usage strings imply a
@@ -45,9 +78,10 @@ one-per-issue. Suggested labels in brackets.
       instrumentation below. **Do this before buying test gear.** `[analysis] [high-value]`
 - [ ] **Locate the updater's validation code** in the decompressed image. Would explain
       any rejection, and confirm exactly what it checks. `[analysis]`
-- [ ] **Decode the MAIN↔GUI protocol.** SPORT1 is configured and its RX interrupt armed
-      (FINDINGS §6), but no consumer of received words was located. Logic analyser on
-      the inter-board link. `[hardware] [instrumentation]`
+- [ ] **Finish decoding the MAIN↔GUI protocol.** MAIN waveform message IDs 4 and 5 and
+      the normal constructor are mapped; transport ownership and the GUI-side receiver
+      remain unresolved. Logic analyser on the inter-board link if static work stalls.
+      `[hardware] [instrumentation]`
 - [ ] **Find the GUI waveform renderer.** Last unmapped subsystem. Needs
       inter-procedural analysis or a hardware watchpoint on framebuffer memory
       (`0x00659B88`). `[analysis] [instrumentation]`
@@ -55,7 +89,7 @@ one-per-issue. Suggested labels in brackets.
       remaining unknown in the container format. Not on the critical path.
       `[analysis] [low-priority]`
 
-## Phase 4 — the actual feature (blocked on Phase 3)
+## Phase 5 — the actual feature (blocked on Phases 2–4)
 
 - [ ] Add `PWV4`/`PWV5` parser entries and handlers on SH-4.
 - [ ] Extend the MAIN→GUI protocol to carry per-column colour.

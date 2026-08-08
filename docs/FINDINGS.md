@@ -258,6 +258,105 @@ cheaply, a hardware watchpoint on framebuffer memory.
 
 ---
 
+## 6b. Real colour-analysis positive control
+
+**Verified:** a user-supplied rekordbox `ANLZ0000.EXT` (SHA-256
+`10de96c1…8c4d0`) parses cleanly as a 98,082-byte PMAI file with nine tags. The three
+waveform tags are:
+
+| tag | entries | bytes/entry | header value |
+|---|---:|---:|---:|
+| `PWV3` | 29,804 | 1 | `0x00960000` |
+| `PWV5` | 29,804 | 2 | `0x00960305` |
+| `PWV4` | 1,200 | 6 | `0x00000000` |
+
+`PWV3` and `PWV5` therefore describe the exact same 198.693-second timeline at 150
+columns per second. Their five-bit heights are identical in 18,639 of 29,804 columns
+(62.5%); the remaining values differ in both directions. Colour detail is aligned with
+the existing blue detail path but is not simply the same height with RGB bits attached.
+All 29,804 `PWV5` entries have zero in their two reserved low bits, and every RGB
+component spans the documented full range 0–7.
+
+### Static PWV3 trace to the GUI boundary
+
+Baseline: stock v1.44 decompressed MAIN, SHA-256
+`f73da28a…b6301d4f`, loaded little-endian at `0xA4000000`. GNU binutils 2.45.1 from the
+pinned KallistiOS `kos-chain` configuration is the authoritative decoder. Cached and
+physical aliases are compared after masking to 29 address bits.
+
+**Verified:** `0xA4388E5C` is a bounded four-byte comparison routine. All four original
+sites load `PWV3` from `0xA40ACE60`, set the length to four, and call it:
+
+| load site | literal pool | containing function |
+|---|---|---|
+| `0xA42ADE42` | `0xA42ADF88` | `0xA42ADC74`–`0xA42AE224` |
+| `0xA42AE438` | `0xA42AE558` | `0xA42AE240`–`0xA42AEB8E` |
+| `0xA42AE66E` | `0xA42AE840` | `0xA42AE240`–`0xA42AEB8E` |
+| `0xA42AEE58` | `0xA42AF100` | `0xA42AEC10`–`0xA42AF172` |
+
+Each function checks, in order, `PMAI`, `PPTH`, `PVBR`, `PQTZ`, `PWAV`, `PWV2`,
+`PCOB`, `PWV3`, `PKEY`, `PCO2`, and `PCP2`; the middle function performs the chain
+twice. Their callers are `0xA42AD594`, `0xA42AD780`, and `0xA42AD9EA`, reached through
+wrappers `0xA4182C20`, `0xA4182CD2`, and `0xA4182D70` for request IDs `0x13E0`,
+`0x13E1`, and `0x13E2`. **Inferred from arguments and exits:** these are validators or
+classifiers, not payload constructors.
+
+The real generic ANLZ path uses a 12-pointer table at `0xA40ACF6C`:
+
+```text
+PMAI PPTH PVBR PQTZ PWAV PWV2 PCOB PCPT PWV3 PKEY PCO2 PCP2
+```
+
+Classifier `0xA42B2F1A` returns the matching index. Its call at `0xA42BAD48` routes
+index 8 to the dedicated `PWV3` handler at `0xA42BB650`–`0xA42BB7D6`.
+
+**Verified storage map:** the handler zeroes and fills a 24-byte descriptor at
+`owner+0x12C8`; the stream object pointer is at `owner+0x1DB4`.
+
+| owner field | observed type | meaning | confidence |
+|---:|---|---|---|
+| `+0x12C0` | word/pointer-sized saved value | tag locator or stream/file position | inferred |
+| `+0x12C8 + 0` | `char[4]` | tag | verified |
+| `+0x12C8 + 4` | big-endian `u32` | `len_header` | verified |
+| `+0x12C8 + 8` | big-endian `u32` | `len_tag` | verified |
+| `+0x12C8 + 12` | big-endian `u16` | reserved/unknown | verified |
+| `+0x12C8 + 14` | big-endian `u16` | entry size | verified |
+| `+0x12C8 + 16` | big-endian `u32` | entry count | verified |
+| `+0x12C8 + 20` | `u16` | unknown | verified |
+| `+0x12C8 + 22` | `u16` | zeroed/unknown | verified |
+| `+0x1DB4` | pointer | parser stream object | verified |
+
+At `0xA42BB79A`, `entry_size × entry_count` is passed to `0xA42B3352`, which validates
+or advances the stream. **No PWV3 payload allocation or copy occurs during this index
+pass.** “Tag accepted” therefore means the descriptor and locator were retained, not
+that 29,804 bytes were decoded into a resident waveform buffer. The supplied EXT is a
+direct positive control: tag/payload offsets `0xCC`/`0xE4`, header 24,
+tag length 29,828, entry size 1, entry count and payload length 29,804.
+
+The later database path is anchored by firmware debug names. `dbcl_GetWaveData`
+(`0xA4149632`) is called at `0xA41721EE` and `0xA41722D2`; after a successful return,
+its callers copy 900 bytes to response offset `+112`. Disc and SD/USB registration functions are
+`0xA414984A` and `0xA414978A`.
+
+**Verified MAIN-side GUI message construction:** `0xA4260D94`, called at
+`0xA42608B8`, constructs normal waveform message ID 5 in the buffer at `0x049854F4`.
+The ID and record count are 16-bit fields at `+112` and `+114`; payload begins at
+`+120`. It processes at most 100 source records with a 36-byte stride, calls
+`0xA42A6EEA`, and emits transformed 16-bit words. Payload-byte and total-byte lengths
+are written at `+28` and `+32`. This is not raw `PWV3`. The clear constructor at
+`0xA42621CC` uses message ID 4; `0xA425C69A` is the current queue/copy candidate.
+
+**Single unresolved edge:** direct pointer propagation has not yet been proved from
+`owner+0x12C0`/the descriptor or the 900-byte `dbcl_GetWaveData` result into the
+36-byte source records consumed by `0xA4260D94`. This one staging edge prevents a full
+end-to-end proof; adjacent code is not being treated as evidence.
+
+The trace is reproducible with `tools/sh4_trace.py` through the `trace-main` lab
+command. It emits JSON, Markdown, and focused GNU disassemblies under ignored
+`work/analysis/` and never modifies the image.
+
+---
+
 ## 7. Verified rebuild
 
 Both offline validation steps pass.
@@ -508,6 +607,11 @@ Self-contained Python, no external dependencies:
 | `dataflow.py` | intra-function constant/pointer propagation for Blackfin; resolves load/store effective addresses through register moves, immediate arithmetic and FP-relative stack spills |
 | `lzss_codec.py` | LZSS encoder + reference decoder matching the firmware exactly |
 | `upd_build.py` | S-record generation, CRC16-XMODEM, `.UPD` assembly |
+| `upd_container.py` | strict update-container, segment-CRC, S-record and MAIN-payload validation |
+| `anlz_color.py` | strict PWV3/PWV4/PWV5 parsing and dependency-free PNG rendering |
+| `sh4_trace.py` | SH-4 alias, call, literal, table and tag tracing with GNU verification |
+| `ethernet_trace.py` | PCAP/PCAPNG waveform-evidence scanner and repeatability summary |
+| `cdj_lab.py` | command-line entry point for firmware, ANLZ, rendering and trace workflows |
 | `harness.py` | loads the GUI LDR image, decodes all ranges, runs dataflow queries |
 
 ## 11. References
