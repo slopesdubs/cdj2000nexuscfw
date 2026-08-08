@@ -32,6 +32,7 @@ from sh4_trace import (  # noqa: E402
     inspect_anlz_pwv3,
     scan_direct_calls,
     scan_indirect_calls,
+    scan_constructed_constants,
     scan_literal_loads,
     scan_pointer_references,
 )
@@ -255,6 +256,19 @@ class Sh4TraceTests(unittest.TestCase):
         self.assertEqual([item.address for item in pointers], [self.BASE + 0x80])
         calls = scan_direct_calls(image, self.BASE, self.BASE + 0x80)
         self.assertEqual([item.instruction for item in calls], [self.BASE + 0x60])
+
+    def test_interleaved_constant_build_recovery(self):
+        image = bytearray(b"\x00" * 0x20)
+        struct.pack_into("<H", image, 0x00, 0xE20E)  # mov #14,r2
+        struct.pack_into("<H", image, 0x02, 0x6013)  # unrelated mov r1,r0
+        struct.pack_into("<H", image, 0x04, 0x4218)  # shll8 r2
+        struct.pack_into("<H", image, 0x06, 0x63C3)  # unrelated mov r12,r3
+        struct.pack_into("<H", image, 0x08, 0x7250)  # add #80,r2 => 0xE50
+        hits = scan_constructed_constants(bytes(image), self.BASE, (0xE50,))
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].address, self.BASE + 0x08)
+        self.assertEqual(hits[0].register, 2)
+        self.assertEqual(hits[0].operations, (self.BASE, self.BASE + 4, self.BASE + 8))
 
     def test_function_and_tag_comparison_recovery(self):
         image = self.make_image()

@@ -333,23 +333,71 @@ that 29,804 bytes were decoded into a resident waveform buffer. The supplied EXT
 direct positive control: tag/payload offsets `0xCC`/`0xE4`, header 24,
 tag length 29,828, entry size 1, entry count and payload length 29,804.
 
+**The post-index edge is now proven.** Accessor `0xA42AC380` reads the saved locator
+from `owner+0x12C0` and descriptor fields at `owner+0x12CC`, `+0x12D6`, `+0x12D8`,
+and `+0x12DC`. It seeks to `locator + len_header`, allocates
+`entry_size × entry_count` bytes via `0xA4219B3C`, clears the allocation, and reads
+the payload through `0xA42194FE`. Its 20-byte result contains entry count, entry size,
+byte count, the descriptor's unknown word, and the allocated payload pointer at `+16`.
+The direct call is `0xA418285C` in wrapper `0xA4182800`.
+
+Firmware strings identify the next layer as `dbcl_GetParWaveData` at `0xA414ADBC`.
+It uses database request/response IDs `0x2904`/`0x4A02`. Service handler
+`0xA417234E` exposes the result through public request `0x42E`, placing the payload
+pointer and count at response offsets `+44` and `+48`. GUI loader `0xA4335EF6`
+issues request `0x42E`, validates response `0x13B5`, and stores those values in
+`0x0556D9F8`/`0x0556D9FC`. Stager `0xA433702E` then transfers them to the current
+track object at `+0x5A4`/`+0x5A8`, freeing a replaced allocation and setting its ready
+flag.
+
+**Verified detailed-waveform MAIN→GUI construction:** Shift-JIS debug strings name
+the code “GU send: detailed waveform.” Header constructor `0xA425B8E0` reads the
+per-track object at `+0x5A4`. First-chunk constructor `0xA425BD60` and extension
+constructor `0xA425C0CC` dereference result `+16` and copy the **raw PWV3 bytes** into
+shared buffer `0x04985564`; there is no height or pixel transformation in these loops.
+
+| frame field | first frame | extension frame |
+|---|---:|---:|
+| word at `+0` | `32` | `32` |
+| payload offset | `+14` | `+6` |
+| maximum PWV3 bytes | 880 | 888 |
+| computed 16-bit trailer | `+0x37E` | `+0x37E` |
+| total frame size | 896 | 896 |
+
+The trailer is computed by `0xA4310FC0`. Sequence/count words are maintained at
+`+2`/`+4`, and the extension path subtracts 888 bytes from the remaining count per
+frame. This supplies direct data-flow proof from the retained PWV3 locator to an
+outbound detailed-waveform buffer. The only narrower unresolved edge is the final
+generic-send handoff from this shared buffer to physical SPORT/DMA serialization;
+it does not block understanding or reproducing the MAIN-side message construction.
+
 The later database path is anchored by firmware debug names. `dbcl_GetWaveData`
 (`0xA4149632`) is called at `0xA41721EE` and `0xA41722D2`; after a successful return,
-its callers copy 900 bytes to response offset `+112`. Disc and SD/USB registration functions are
-`0xA414984A` and `0xA414978A`.
+its callers copy 900 bytes to response offset `+112`. Disc and SD/USB registration
+functions are `0xA414984A` and `0xA414978A`.
 
-**Verified MAIN-side GUI message construction:** `0xA4260D94`, called at
-`0xA42608B8`, constructs normal waveform message ID 5 in the buffer at `0x049854F4`.
-The ID and record count are 16-bit fields at `+112` and `+114`; payload begins at
-`+120`. It processes at most 100 source records with a 36-byte stride, calls
-`0xA42A6EEA`, and emits transformed 16-bit words. Payload-byte and total-byte lengths
-are written at `+28` and `+32`. This is not raw `PWV3`. The clear constructor at
-`0xA42621CC` uses message ID 4; `0xA425C69A` is the current queue/copy candidate.
+**Corrected MAIN-side GUI split:** the 900-byte WAVE constructor is `0xA4260C82`, not
+`0xA4260D94`. The operation at `0xA426017E` calls cache lookup `0xA4336DDC`; a hit
+returns one of 20 `_CWCASH_` records at `0x05560698` with stride `0x8B0`. At
+`0xA4260378`, 900 bytes are copied from record offset `+40` into staging buffer
+`0x04985D64`; call `0xA42603B2` then invokes `0xA4260C82`. The constructor emits
+message ID 4 in `0x049854F4`, transforms the source's 800-byte and 100-byte regions
+into 16-bit fields, and is directly labelled `WAVE[%d,%d]` by a firmware debug string.
+The command-routing link between this cache loader and `dbcl_GetWaveData` remains
+inferred; the addresses, sizes, cache layout, copy, and GUI construction are verified.
 
-**Single unresolved edge:** direct pointer propagation has not yet been proved from
-`owner+0x12C0`/the descriptor or the 900-byte `dbcl_GetWaveData` result into the
-36-byte source records consumed by `0xA4260D94`. This one staging edge prevents a full
-end-to-end proof; adjacent code is not being treated as evidence.
+**Verified separate CUE overlay path:** `0xA4336070` copies an exact `0xE7C`-byte
+response payload from offset `+112` into `0x0556C858`. Call `0xA4334FE0` copies that
+working table to canonical table `0x0556B458` and sets ready flag `0x0556C2D4`.
+Initializer `0xA4336AAE` proves the table is exactly 103 records of 36 bytes. At
+`0xA426087A` the entire table is snapshotted to `0x049860F0`, and call `0xA42608B8`
+invokes builder `0xA4260D94`. That builder processes at most 100 cue records and emits
+message ID 5. `_CUEWAV_` and CUE-operation debug strings prove these are cue/marker
+records, not PWV3 waveform samples.
+
+The legacy 900-byte WAVE/CWCASH and 103-record CUE overlay paths remain useful
+boundary controls, but they are independent of this now-proven PWV3 partial/detail
+waveform path. In particular, the 36-byte cue records are not waveform samples.
 
 The trace is reproducible with `tools/sh4_trace.py` through the `trace-main` lab
 command. It emits JSON, Markdown, and focused GNU disassemblies under ignored

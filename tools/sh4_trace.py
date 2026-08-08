@@ -149,6 +149,22 @@ class TagComparison:
     length_is_four: bool
 
 
+@dataclass(frozen=True)
+class ConstantBuild:
+    """A small immediate assembled in one SH-4 register.
+
+    ``operations`` contains the instruction addresses that contributed to the
+    final value.  The scanner is intended for structure offsets such as the
+    PWV3 handler's split ``0xE48``/``0xE50`` constants, not arbitrary symbolic
+    execution.
+    """
+
+    address: int
+    register: int
+    value: int
+    operations: tuple[int, ...]
+
+
 def find_tag_occurrences(image: bytes, base: int, tag: bytes) -> List[int]:
     if len(tag) != 4:
         raise TraceError("ANLZ tags must be exactly four bytes")
@@ -329,6 +345,85 @@ def scan_indirect_calls(
                 )
             )
     return calls
+
+
+def scan_constructed_constants(
+    image: bytes,
+    base: int,
+    targets: Iterable[int],
+    max_instruction_span: int = 16,
+) -> List[ConstantBuild]:
+    """Find ``mov #imm``/shift/``add #imm`` constants with interleaving.
+
+    GCC's SH-4 output frequently creates offsets by loading an 8-bit immediate,
+    shifting it by 8 or 16 bits, and adding another signed immediate.  Unrelated
+    instructions may appear between those operations.  Per-register state is
+    retained across such instructions, but discarded when the register is
+    overwritten or the build grows beyond ``max_instruction_span``.
+
+    Results are candidates: scanning a flat firmware image also visits literal
+    pools and data.  Callers must corroborate a hit with authoritative GNU
+    disassembly before treating it as code.
+    """
+
+    wanted = set(targets)
+    if max_instruction_span < 1:
+        raise TraceError("constant-build instruction span must be positive")
+
+    # Each state is (value, contributing instruction addresses).
+    states: List[Optional[tuple[int, tuple[int, ...]]]] = [None] * 16
+    results: List[ConstantBuild] = []
+
+    for offset in range(0, len(image) - 1, 2):
+        address = base + offset
+        word = read_u16(image, offset)
+        top = word >> 12
+        n = (word >> 8) & 0xF
+
+        for register, state in enumerate(states):
+            if state is None:
+                continue
+            if address - state[1][0] > max_instruction_span * 2:
+                states[register] = None
+
+        changed_register: Optional[int] = None
+        if top == 0xE:  # mov #imm,rn
+            immediate = word & 0xFF
+            immediate = immediate - 0x100 if immediate & 0x80 else immediate
+            states[n] = (immediate, (address,))
+            changed_register = n
+        elif top == 0x7:  # add #imm,rn
+            state = states[n]
+            if state is not None:
+                immediate = word & 0xFF
+                immediate = immediate - 0x100 if immediate & 0x80 else immediate
+                states[n] = (state[0] + immediate, state[1] + (address,))
+                changed_register = n
+            else:
+                states[n] = None
+        elif word & 0xF0FF in (0x4000, 0x4008, 0x4018, 0x4028):
+            # shll, shll2, shll8, shll16
+            shifts = {0x4000: 1, 0x4008: 2, 0x4018: 8, 0x4028: 16}
+            register = (word >> 8) & 0xF
+            state = states[register]
+            if state is not None:
+                shift = shifts[word & 0xF0FF]
+                states[register] = (state[0] << shift, state[1] + (address,))
+                changed_register = register
+        else:
+            written = destination_register(word)
+            if written is not None:
+                states[written] = None
+
+        if changed_register is None:
+            continue
+        state = states[changed_register]
+        if state is not None and state[0] in wanted:
+            results.append(
+                ConstantBuild(address, changed_register, state[0], state[1])
+            )
+
+    return results
 
 
 def find_function_range(
@@ -650,30 +745,131 @@ def recover_stock_pwv3_dataflow(image: bytes, base: int, digest: str) -> dict:
             ],
             "confidence": "verified call and copy sites; role names are anchored by firmware debug strings",
         },
-        "main_gui_boundary": {
-            "wave_builder": _hex(0xA4260D94),
-            "wave_builder_call": _hex(0xA42608B8),
+        "legacy_wave_gui_boundary": {
+            "request_operation": _hex(0xA426017E),
+            "cache_lookup": _hex(0xA4336DDC),
+            "cache_pool": _hex(0x05560698),
+            "cache_record_count": 20,
+            "cache_record_stride": _hex(0x8B0),
+            "cache_payload_offset": 40,
+            "cache_payload_size": 900,
+            "staging_buffer": _hex(0x04985D64),
+            "staging_copy_call": _hex(0xA4260378),
+            "wave_builder": _hex(0xA4260C82),
+            "wave_builder_call": _hex(0xA42603B2),
             "message_buffer": _hex(0x049854F4),
             "message_id_offset": 112,
-            "message_id": 5,
+            "message_id": 4,
             "record_count_offset": 114,
             "payload_offset": 120,
             "payload_element_type": "u16 words",
             "payload_bytes_offset": 28,
             "total_bytes_offset": 32,
+            "source_segments": [800, 100],
+            "debug_string": "GU operation: WAVE[%d,%d]",
+            "representation": "legacy 900-byte WAVE/CWCASH data transformed into 16-bit fields",
+            "pwv3_link": "not proven",
+            "confidence": "verified addresses, sizes, message writes, and WAVE/CWCASH semantics; the upstream command-routing link to dbcl_GetWaveData remains inferred",
+        },
+        "cue_overlay_gui_boundary": {
+            "response_loader": _hex(0xA4336070),
+            "response_payload_offset": 112,
+            "response_payload_size": _hex(0xE7C),
+            "response_to_working_copy": _hex(0xA43361AC),
+            "working_table": _hex(0x0556C858),
+            "working_to_canonical_copy": _hex(0xA4334FE0),
+            "canonical_table": _hex(0x0556B458),
+            "ready_flag": _hex(0x0556C2D4),
+            "table_initializer": _hex(0xA4336AAE),
+            "record_size": 36,
+            "record_count": 103,
+            "table_size": _hex(0xE7C),
+            "gui_staging_buffer": _hex(0x049860F0),
+            "canonical_to_gui_copy": _hex(0xA426087A),
+            "cue_builder": _hex(0xA4260D94),
+            "cue_builder_call": _hex(0xA42608B8),
+            "message_buffer": _hex(0x049854F4),
+            "message_id_offset": 112,
+            "message_id": 5,
+            "record_count_offset": 114,
+            "payload_offset": 120,
             "record_input_stride": 36,
             "record_loop_limit": 100,
             "sample_helper": _hex(0xA42A6EEA),
-            "clear_builder": _hex(0xA42621CC),
-            "clear_message_id": 4,
-            "queue_copy_candidate": _hex(0xA425C69A),
-            "representation": "transformed 16-bit fields, not raw PWV3 bytes",
-            "confidence": "verified message writes; queue ownership remains inferred",
+            "debug_semantics": "CUEWAV/CUE marker data",
+            "pwv3_link": "not a PWV3 payload path",
+            "confidence": "verified complete staging chain and cue semantics",
         },
-        "single_unresolved_edge": {
-            "from": "PWV3 tag locator/descriptor and dbcl_GetWaveData 900-byte result",
-            "to": "source records consumed by the 0xA4260D94 waveform builder",
-            "why": "no direct pointer propagation from owner+0x12C0/+0x12C8 or the DB response buffer into the builder source table has yet been proven",
+        "pwv3_payload_accessor": {
+            "address": _hex(0xA42AC380),
+            "call": _hex(0xA418285C),
+            "owner_locator_offset": _hex(0x12C0),
+            "descriptor_fields_read": {
+                "len_header": _hex(0x12CC),
+                "entry_size": _hex(0x12D6),
+                "entry_count": _hex(0x12D8),
+                "unknown_word": _hex(0x12DC),
+            },
+            "result_layout": [
+                {"offset": 0, "meaning": "entry_count"},
+                {"offset": 4, "meaning": "entry_size"},
+                {"offset": 8, "meaning": "payload byte count"},
+                {"offset": 12, "meaning": "descriptor unknown word"},
+                {"offset": 16, "meaning": "allocated PWV3 payload pointer"},
+            ],
+            "seek_or_read_setup": _hex(0xA42193A6),
+            "allocation": _hex(0xA4219B3C),
+            "clear": _hex(0xA4388BA0),
+            "read": _hex(0xA42194FE),
+            "payload_address_expression": "saved locator + len_header",
+            "payload_byte_count_expression": "entry_size * entry_count",
+            "confidence": "verified direct data flow",
+        },
+        "partial_wave_request_path": {
+            "accessor_wrapper": _hex(0xA4182800),
+            "accessor_call": _hex(0xA418285C),
+            "internal_result_sender": _hex(0xA419530C),
+            "internal_command": _hex(0x2015),
+            "named_api": "dbcl_GetParWaveData",
+            "named_api_address": _hex(0xA414ADBC),
+            "database_request": _hex(0x2904),
+            "database_response": _hex(0x4A02),
+            "service_handler": _hex(0xA417234E),
+            "public_request": _hex(0x42E),
+            "public_dispatch": _hex(0xA4164910),
+            "response_payload_pointer_offset": 44,
+            "response_entry_count_offset": 48,
+            "gui_loader": _hex(0xA4335EF6),
+            "gui_response": _hex(0x13B5),
+            "global_payload_pointer": _hex(0x0556D9F8),
+            "global_entry_count": _hex(0x0556D9FC),
+            "track_owner_stager": _hex(0xA433702E),
+            "track_payload_object_offset": _hex(0x5A4),
+            "track_entry_count_offset": _hex(0x5A8),
+            "confidence": "verified; API role is anchored by firmware debug strings",
+        },
+        "detailed_wave_gui_boundary": {
+            "debug_semantics": "GU send: detailed waveform",
+            "message_buffer": _hex(0x04985564),
+            "header_constructor": _hex(0xA425B8E0),
+            "header_constructor_call": _hex(0xA425EC0A),
+            "first_chunk_constructor": _hex(0xA425BD60),
+            "first_chunk_call": _hex(0xA425AA28),
+            "extension_constructor": _hex(0xA425C0CC),
+            "extension_calls": [_hex(0xA425AA7E), _hex(0xA425885C)],
+            "message_word_0": 32,
+            "frame_size": 896,
+            "trailer_offset": _hex(0x37E),
+            "trailer_size": 2,
+            "trailer_function": _hex(0xA4310FC0),
+            "first_payload_offset": 14,
+            "first_payload_maximum": 880,
+            "extension_payload_offset": 6,
+            "extension_payload_maximum": 888,
+            "source_pointer_path": "track object+0x5A4 -> result object+16 -> allocated PWV3 payload",
+            "outbound_representation": "raw PWV3 bytes",
+            "physical_transport_edge": "the shared-buffer constructors and scheduling calls are identified; the final generic send-to-physical SPORT/DMA serialization is not yet independently proven",
+            "confidence": "verified through direct loads and byte-copy loops; physical transport edge unresolved",
         },
     }
 
@@ -793,10 +989,19 @@ def build_trace(
             stock_ranges = {
                 "tag_index_classifier": (0xA42B2F1A, 0xA42B2FAE),
                 "pwv3_handler": (0xA42BB650, 0xA42BB7D6),
+                "pwv3_payload_accessor": (0xA42AC380, 0xA42AC5B4),
                 "stream_helpers": (0xA42B315C, 0xA42B3454),
                 "dbcl_get_wave": (0xA4149632, 0xA414978A),
+                "dbcl_get_par_wave": (0xA414ADBC, 0xA414AE7E),
                 "db_wave_consumers": (0xA4171FAC, 0xA417234E),
-                "gui_wave_builder": (0xA4260D94, 0xA42611EA),
+                "par_wave_service": (0xA417234E, 0xA4172498),
+                "par_wave_gui_loader": (0xA4335EF6, 0xA4336070),
+                "par_wave_track_stager": (0xA433702E, 0xA43371A0),
+                "detailed_wave_header": (0xA425B8E0, 0xA425BA48),
+                "detailed_wave_first_chunk": (0xA425BD60, 0xA425C0CC),
+                "detailed_wave_extension": (0xA425C0CC, 0xA425C386),
+                "legacy_wave_builder": (0xA4260C82, 0xA4260D94),
+                "cue_builder": (0xA4260D94, 0xA42611EA),
                 "gui_wave_clear_builder": (0xA42621CC, 0xA4262274),
             }
             for name, (start, end) in stock_ranges.items():
@@ -845,14 +1050,18 @@ def build_trace(
                 "The listed lookup sites load a PWV3 tag pointer and compare four bytes.",
                 "Stock v1.44 dispatches tag-table index 8 to a dedicated PWV3 metadata handler.",
                 "The PWV3 handler stores a 24-byte descriptor and consumes entry_size * entry_count bytes without allocating or copying the payload during indexing.",
-                "The normal MAIN-side waveform message constructor emits transformed 16-bit fields rather than raw PWV3 bytes.",
+                "The post-index accessor at 0xA42AC380 seeks to saved_locator + len_header, allocates entry_size * entry_count bytes, and reads the PWV3 payload into that allocation.",
+                "dbcl_GetParWaveData carries the allocated payload through public request 0x42E into a per-track object at +0x5A4.",
+                "The detailed-waveform constructors copy raw PWV3 bytes into fixed 896-byte MAIN-to-GUI frames: 880 bytes in the first frame and up to 888 bytes in each extension frame.",
+                "The legacy MAIN-side WAVE constructor consumes a staged 900-byte CWCASH record and emits message ID 4.",
+                "The adjacent message-ID-5 constructor consumes a separate 103 x 36-byte CUEWAV table; its full staging-copy chain is proven and is not PWV3 payload flow.",
             ],
             "inferred": [
                 "The three original containing functions are tag-list validators/classifiers, not payload handlers.",
-                "owner+0x12C0 is a saved tag locator or stream/file position used for later retrieval.",
+                "The 0x426/0x427 request paths connect the CWCASH loader to the named dbcl_GetWaveData handlers through command routing.",
             ],
             "unresolved": [
-                "Direct data flow from the saved PWV3 locator/dbcl_GetWaveData result into the source table consumed by the GUI waveform constructor",
+                "The last generic-send step from the constructed detailed-waveform shared buffer to the physical MAIN-to-GUI SPORT/DMA link",
             ],
         },
     }
@@ -923,8 +1132,11 @@ def markdown_report(trace: dict) -> str:
     if flow.get("available"):
         dispatch = flow["tag_index_dispatch"]
         handler = flow["pwv3_handler"]
-        gui = flow["main_gui_boundary"]
-        gap = flow["single_unresolved_edge"]
+        accessor = flow["pwv3_payload_accessor"]
+        partial = flow["partial_wave_request_path"]
+        detail = flow["detailed_wave_gui_boundary"]
+        wave = flow["legacy_wave_gui_boundary"]
+        cue = flow["cue_overlay_gui_boundary"]
         lines.extend(
             [
                 "",
@@ -933,13 +1145,18 @@ def markdown_report(trace: dict) -> str:
                 f"- Tag table `{dispatch['pointer_table']}` → classifier `{dispatch['classifier']}` → call `{dispatch['classifier_call']}` → index {dispatch['pwv3_index']} branch `{dispatch['pwv3_branch']}`.",
                 f"- Handler `{handler['range']['start']}`–`{handler['range']['end']}` stores a {handler['owner_descriptor']['size']}-byte descriptor at owner+`{handler['owner_descriptor']['offset']}`.",
                 f"- Payload handling: {handler['payload_action']}; {handler['allocation_or_copy']}.",
+                f"- Post-index accessor `{accessor['address']}` seeks to {accessor['payload_address_expression']}, allocates {accessor['payload_byte_count_expression']} bytes, and reads the payload into result+16.",
+                f"- `{partial['named_api']}` `{partial['named_api_address']}` carries that result through request `{partial['public_request']}`; GUI loader `{partial['gui_loader']}` stages it at track object+`{partial['track_payload_object_offset']}`.",
+                f"- Detailed-waveform constructors `{detail['first_chunk_constructor']}` and `{detail['extension_constructor']}` copy {detail['outbound_representation']} into {detail['frame_size']}-byte frames at `{detail['message_buffer']}`.",
+                f"- The first frame starts payload at +{detail['first_payload_offset']} and carries at most {detail['first_payload_maximum']} bytes; extensions start at +{detail['extension_payload_offset']} and carry at most {detail['extension_payload_maximum']} bytes. A {detail['trailer_size']}-byte computed trailer is written at +`{detail['trailer_offset']}`.",
                 f"- After `dbcl_GetWaveData` `{flow['database_wave_path']['get_wave_data']}` succeeds, its callers copy {flow['database_wave_path']['result_copy_size']} bytes into a response at +{flow['database_wave_path']['result_destination_offset']}.",
-                f"- GUI waveform builder `{gui['wave_builder']}` creates message ID {gui['message_id']} in `{gui['message_buffer']}`, with transformed 16-bit fields starting at +{gui['payload_offset']}.",
-                f"- Payload-byte and total-byte fields are +{gui['payload_bytes_offset']} and +{gui['total_bytes_offset']}; the input record stride is {gui['record_input_stride']} bytes.",
+                f"- The legacy WAVE path looks up a {wave['cache_payload_size']}-byte CWCASH record at `{wave['cache_lookup']}`, copies record+{wave['cache_payload_offset']} to `{wave['staging_buffer']}`, then calls `{wave['wave_builder']}` to create message ID {wave['message_id']}.",
+                f"- The separate CUE path copies {cue['record_count']} x {cue['record_size']}-byte records through `{cue['working_table']}` → `{cue['canonical_table']}` → `{cue['gui_staging_buffer']}` before builder `{cue['cue_builder']}` creates message ID {cue['message_id']}.",
+                "- The WAVE and CUE paths remain separate legacy controls; the partial/detail path above is the direct PWV3 consumer.",
                 "",
-                "### Single unresolved edge",
+                "### Remaining transport edge",
                 "",
-                f"{gap['from']} → {gap['to']}. {gap['why'][0].upper() + gap['why'][1:]}.",
+                detail["physical_transport_edge"] + ".",
                 "",
             ]
         )

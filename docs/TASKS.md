@@ -50,12 +50,18 @@ one-per-issue. Suggested labels in brackets.
 - [x] **Recover PWV3 metadata storage.** The 24-byte owner descriptor and real EXT
       sizes are proven; indexing advances over the payload rather than allocating or
       copying it. `[analysis]`
-- [x] **Locate a downstream data path and GUI constructor.** The named database wave
-      retrieval and normal/clear GUI waveform builders are mapped. Message 5 contains
-      transformed 16-bit words, not raw PWV3. `[analysis]`
-- [ ] **Close the single staging edge.** Prove the transfer from the retained PWV3
-      locator/900-byte database result into the 36-byte records consumed by
-      `0xA4260D94`. `[analysis] [blocker]`
+- [x] **Separate WAVE and CUE GUI paths.** The 900-byte CWCASH path feeds WAVE message
+      ID 4 through `0xA4260C82`; the fully traced 103×36-byte table feeds CUE message
+      ID 5 through `0xA4260D94`. Neither is direct PWV3 payload flow. `[analysis]`
+- [x] **Find the real PWV3 post-index accessor and GUI constructor.** `0xA42AC380`
+      seeks to the retained locator plus header length, allocates and reads the full
+      PWV3 payload. `dbcl_GetParWaveData` carries it to track object `+0x5A4`, and
+      `0xA425BD60`/`0xA425C0CC` copy raw bytes into 896-byte detailed-waveform frames.
+      `[analysis] [milestone]`
+- [ ] **Confirm the final physical transport handoff.** Trace shared buffer
+      `0x04985564` from the detailed-waveform scheduler through the generic send call
+      into the actual MAIN→GUI SPORT/DMA serializer. The message format itself is
+      already proven, so this is no longer a parser/consumer blocker. `[analysis]`
 - [ ] **Capture Ethernet twice.** Same track and phase timeline; scan both PCAPs with
       `tools/ethernet_trace.py`. A repeated absence is still evidence. `[hardware]`
 
@@ -78,9 +84,10 @@ one-per-issue. Suggested labels in brackets.
       instrumentation below. **Do this before buying test gear.** `[analysis] [high-value]`
 - [ ] **Locate the updater's validation code** in the decompressed image. Would explain
       any rejection, and confirm exactly what it checks. `[analysis]`
-- [ ] **Finish decoding the MAIN↔GUI protocol.** MAIN waveform message IDs 4 and 5 and
-      the normal constructor are mapped; transport ownership and the GUI-side receiver
-      remain unresolved. Logic analyser on the inter-board link if static work stalls.
+- [ ] **Finish decoding the MAIN↔GUI protocol.** Legacy message IDs 4/5 and the raw
+      PWV3 detailed-waveform 896-byte frame constructors are mapped; physical transport
+      ownership and the GUI-side receiver remain unresolved. Logic analyser on the
+      inter-board link if static work stalls.
       `[hardware] [instrumentation]`
 - [ ] **Find the GUI waveform renderer.** Last unmapped subsystem. Needs
       inter-procedural analysis or a hardware watchpoint on framebuffer memory
