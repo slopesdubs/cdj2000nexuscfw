@@ -96,6 +96,28 @@ class GuiReceiveResult:
     records: bytes
 
 
+@dataclass(frozen=True)
+class Pwv5PatchColumn:
+    """One proposed patched-GUI column decoded from a big-endian PWV5 word."""
+
+    raw_word: int
+    red3: int
+    green3: int
+    blue3: int
+    height: int
+    rgb555: int
+
+
+@dataclass(frozen=True)
+class Pwv5PatchResult:
+    """Output of the experimental backwards-expanding PWV5 GUI conversion."""
+
+    payload: bytes
+    columns: Sequence[Pwv5PatchColumn]
+    records: bytes
+    record_rgb555: bytes
+
+
 def extract_waveform_source(data: bytes, tag_kind: str = "PWV3") -> WaveformSource:
     """Extract a generic 24-byte-header waveform tag without transforming it."""
 
@@ -305,6 +327,60 @@ def pack_gui_column_colors(payload: bytes) -> bytes:
     )
 
 
+def expand_3_to_5(component: int) -> int:
+    """Expand a three-bit colour component using abc -> abcab."""
+
+    if not 0 <= component <= 7:
+        raise WaveEmulatorError("three-bit component must be in the range 0..7")
+    return (component << 2) | (component >> 1)
+
+
+def decode_pwv5_patch_columns(payload: bytes) -> List[Pwv5PatchColumn]:
+    """Model the proposed GUI hook's big-endian PWV5-to-RGB555 transform."""
+
+    if len(payload) % 2:
+        raise WaveEmulatorError("PWV5 payload length must be even")
+    columns: List[Pwv5PatchColumn] = []
+    for offset in range(0, len(payload), 2):
+        word = struct.unpack_from(">H", payload, offset)[0]
+        red3 = (word >> 13) & 7
+        green3 = (word >> 10) & 7
+        blue3 = (word >> 7) & 7
+        red5 = expand_3_to_5(red3)
+        green5 = expand_3_to_5(green3)
+        blue5 = expand_3_to_5(blue3)
+        columns.append(
+            Pwv5PatchColumn(
+                raw_word=word,
+                red3=red3,
+                green3=green3,
+                blue3=blue3,
+                height=(word >> 2) & 0x1F,
+                rgb555=(red5 << 10) | (green5 << 5) | blue5,
+            )
+        )
+    return columns
+
+
+def emulate_pwv5_patch(frames: Sequence[bytes]) -> Pwv5PatchResult:
+    """Emulate receiving into the record arena and expanding backwards safely."""
+
+    payload = reassemble_detail_frames(frames)
+    columns = decode_pwv5_patch_columns(payload)
+    records = bytearray(len(columns) * 12)
+    records[: len(payload)] = payload
+    colors = bytearray(len(columns) * 2)
+    for index in range(len(columns) - 1, -1, -1):
+        column = columns[index]
+        struct.pack_into("<H", records, index * 12, column.height)
+        struct.pack_into("<H", records, index * 12 + 2, 0)
+        struct.pack_into("<H", records, index * 12 + 4, column.rgb555)
+        struct.pack_into("<H", records, index * 12 + 6, 0)
+        struct.pack_into("<I", records, index * 12 + 8, 0)
+        struct.pack_into("<H", colors, index * 2, column.rgb555)
+    return Pwv5PatchResult(payload, columns, bytes(records), bytes(colors))
+
+
 def pack_gui_wave_records(payload: bytes) -> bytes:
     """Build an exhaustive offline image of the GUI's 12-byte column records.
 
@@ -371,6 +447,15 @@ def emulate_anlz_file(
     (output_directory / "gui-column-records.bin").write_bytes(gui_records)
     gui_colors = pack_gui_column_colors(reassembled)
     (output_directory / "gui-column-colors-rgb555.bin").write_bytes(gui_colors)
+    patch_result: Optional[Pwv5PatchResult] = None
+    if source.tag == "PWV5":
+        patch_result = emulate_pwv5_patch(frames)
+        (output_directory / "experimental-pwv5-records.bin").write_bytes(
+            patch_result.records
+        )
+        (output_directory / "experimental-pwv5-rgb555.bin").write_bytes(
+            patch_result.record_rgb555
+        )
     payload_digest = hashlib.sha256(source.payload).hexdigest()
     manifest = {
         "schema": 1,
@@ -460,6 +545,33 @@ def emulate_anlz_file(
                 ),
             },
         },
+        "experimental_pwv5_patch": (
+            {
+                "enabled": True,
+                "transport": "reuse stock command 32 and 896-byte frame envelope",
+                "frames": len(frames),
+                "input_bytes": len(source.payload),
+                "columns": len(patch_result.columns),
+                "conversion": (
+                    "big-endian PWV5 received at record base, then expanded "
+                    "backwards into stock height records with RGB555 at +4"
+                ),
+                "rgb_expansion": "3-bit abc -> 5-bit abcab",
+                "record_file": "experimental-pwv5-records.bin",
+                "record_sha256": hashlib.sha256(patch_result.records).hexdigest(),
+                "rgb555_file": "experimental-pwv5-rgb555.bin",
+                "rgb555_sha256": hashlib.sha256(
+                    patch_result.record_rgb555
+                ).hexdigest(),
+                "renderer_redirect": (
+                    "0x00D2E230 loads record[column].rgb555 at +4 instead of "
+                    "palette[legacy_color_code]"
+                ),
+                "hardware_status": "offline-only; not approved for flashing",
+            }
+            if patch_result is not None
+            else {"enabled": False, "reason": "source tag is not PWV5"}
+        ),
     }
     (output_directory / "manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"

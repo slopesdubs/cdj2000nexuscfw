@@ -443,8 +443,49 @@ retain the previous frame's tail and are included in its CRC.
 `tools/nxs_wave_emulator.py` reproduces this behavior. Applied to the supplied EXT, it
 turns the 29,804 PWV3 bytes into 34 fixed frames, validates every CRC, and reassembles
 the source payload byte-identically. The same harness can place 59,608 raw PWV5 bytes
-in 68 frames as an explicitly experimental envelope test; this does not imply that the
-stock GUI can decode or render them.
+in 68 frames as an explicitly experimental envelope test.
+
+**Experimental PWV5 patch seam (offline verified, not hardware-approved):** replacing
+the three shared MAIN `PWV3` literals with `PWV5` makes the existing parser and
+post-index accessor retain and allocate the two-byte entries. One additional MAIN
+instruction is essential. At `0xA425B9EA`, stock loads descriptor `+0` (entry count)
+as the number of bytes to transmit. The experimental patch changes this to descriptor
+`+8` (the already-validated `entry_size × entry_count` byte count). Without this
+change, a PWV5 track would transmit only 29,804 of its 59,608 bytes.
+
+The stock receive area at `0x01A65168` cannot safely hold PWV5: the next heavily used
+GUI globals begin at `0x01A6E140`, leaving only `0x8FD8` (36,824) bytes. A canonical
+59,608-byte PWV5 transfer would overwrite 22,784 bytes of live state. The experimental
+receiver therefore redirects both command-32 copy sites to the much larger stock
+record arena at `0x01011940`. A first-frame copy hook clears visible count
+`0x00CD3698`, then chains to the original copy routine.
+
+The arena size is directly proven from stock code. Initializer `0x00D2C0DE` calls the
+verified byte-fill routine at `0x00D4837C` with destination `0x01011940`, fill byte
+zero, and length `0x00A4CDD8` (10,800,600 bytes). The cleared range ends exclusively
+at `0x01A5E718`, enough for 900,050 12-byte records. The canonical 29,804-record
+result needs 357,648 bytes and ends at `0x01068E50`; the 59,608-byte raw input also
+fits before backwards expansion. Arena capacity is therefore no longer an inferred
+safety assumption.
+
+On GUI completion, a 184-byte Blackfin blob at `0x00D4A000` walks the PWV5 input
+backwards and expands it into non-overlapping 12-byte records in the same arena. Each
+record contains five-bit height at `+0`, zeroed stock state fields, and little-endian
+RGB555 at `+4`. Renderer `0x00D2E230` is redirected from the legacy palette to record
+`+4`. The visible count is published only after conversion. The first candidate is
+deliberately capped at 29,804 columns; longer inputs fail closed with zero visible
+records.
+
+The assembled routine is audited during every candidate build: it rejects odd byte
+lengths, divides the validated total by two, and sets its backwards input pointer to
+`base + (column_count × 2) - 2`. This guards against accidentally indexing the
+two-byte input with a one-byte column count.
+
+The supplied real PWV5 EXT now passes this offline chain: 59,608 bytes, 68 CRC-valid
+frames, byte-identical reassembly, and 29,804 height/RGB555 columns. This proves the
+static patch data flow and bounded memory capacity, not live scheduling or lifecycle
+safety. Remaining hardware risks are doubled transfer duration, concurrent arena use
+during track transitions, and recovery from an updater or boot failure.
 
 This supplies direct data-flow proof from the retained PWV3 locator to an outbound
 detailed-waveform buffer. The matching Blackfin receiver in §6 independently confirms

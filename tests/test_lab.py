@@ -21,7 +21,17 @@ from anlz_color import (  # noqa: E402
 )
 from lzss_codec import compress, decompress  # noqa: E402
 from ethernet_trace import compare_captures, scan_capture  # noqa: E402
-from gui_receiver_trace import FINAL, ZEROFILL, flatten_code, parse_ldr_blocks  # noqa: E402
+from gui_receiver_trace import (  # noqa: E402
+    CANONICAL_COLUMNS,
+    FINAL,
+    RECORD_ARENA_BASE,
+    RECORD_ARENA_CLEAR_BYTES,
+    RECORD_ARENA_END,
+    RECORD_STRIDE,
+    ZEROFILL,
+    flatten_code,
+    parse_ldr_blocks,
+)
 from nxs_wave_emulator import (  # noqa: E402
     CRC_OFFSET,
     EXTENSION_PAYLOAD_CAPACITY,
@@ -30,8 +40,10 @@ from nxs_wave_emulator import (  # noqa: E402
     LEGACY_RGB555_PALETTE,
     WaveEmulatorError,
     decode_gui_wave_columns,
+    decode_pwv5_patch_columns,
     emulate_anlz_file,
     emulate_gui_receiver,
+    emulate_pwv5_patch,
     encode_detail_frames,
     extract_waveform_source,
     inspect_detail_frames,
@@ -40,6 +52,17 @@ from nxs_wave_emulator import (  # noqa: E402
     reassemble_detail_frames,
     rgb555_to_rgb888,
     rgb888_to_rgb555,
+    expand_3_to_5,
+)
+from nxs_color_patch import (  # noqa: E402
+    MAIN_INTERNAL_VERSION_OFFSET,
+    MAIN_TAG_OFFSETS,
+    MAIN_TRANSPORT_LENGTH_OFFSET,
+    MAIN_TRANSPORT_LENGTH_PWV5,
+    MAIN_TRANSPORT_LENGTH_STOCK,
+    ColorPatchError,
+    locate_ldr_blocks,
+    patch_main_decompressed,
 )
 from srec_parse import SRecError, parse_srec  # noqa: E402
 from sh4_trace import (  # noqa: E402
@@ -278,6 +301,36 @@ class NxsWaveEmulatorTests(unittest.TestCase):
         with self.assertRaises(WaveEmulatorError):
             rgb888_to_rgb555(256, 0, 0)
 
+    def test_experimental_pwv5_backwards_record_conversion(self):
+        values = (
+            (7 << 13) | (5 << 10) | (3 << 7) | (31 << 2),
+            (1 << 13) | (2 << 10) | (4 << 7) | (9 << 2),
+        )
+        payload = struct.pack(">2H", *values)
+        result = emulate_pwv5_patch(encode_detail_frames(payload))
+        self.assertEqual(result.payload, payload)
+        self.assertEqual([column.height for column in result.columns], [31, 9])
+        expected_first = (
+            (expand_3_to_5(7) << 10)
+            | (expand_3_to_5(5) << 5)
+            | expand_3_to_5(3)
+        )
+        self.assertEqual(result.columns[0].rgb555, expected_first)
+        self.assertEqual(struct.unpack_from("<H", result.records)[0], 31)
+        self.assertEqual(struct.unpack_from("<H", result.records, 4)[0], expected_first)
+        self.assertEqual(struct.unpack_from("<H", result.record_rgb555)[0], expected_first)
+        self.assertEqual(result.records[2:4], b"\0\0")
+        self.assertEqual(result.records[6:12], b"\0" * 6)
+        self.assertEqual(len(decode_pwv5_patch_columns(payload)), 2)
+
+    def test_real_size_pwv5_uses_stock_envelope_in_68_frames(self):
+        payload = bytes(index & 0xFF for index in range(29_804 * 2))
+        frames = encode_detail_frames(payload)
+        result = emulate_pwv5_patch(frames)
+        self.assertEqual(len(frames), 68)
+        self.assertEqual(len(result.columns), 29_804)
+        self.assertEqual(len(result.record_rgb555), len(payload))
+
     def test_anlz_artifacts_are_byte_identical(self):
         payload = bytes(range(64)) * 20
         anlz = make_anlz(make_pwv3(payload))
@@ -309,6 +362,15 @@ class NxsWaveEmulatorTests(unittest.TestCase):
 
 
 class GuiReceiverTraceTests(unittest.TestCase):
+    def test_stock_record_arena_capacity_covers_canonical_waveform(self):
+        self.assertEqual(RECORD_ARENA_CLEAR_BYTES, 10_800_600)
+        self.assertEqual(RECORD_ARENA_END, 0x01A5E718)
+        self.assertEqual(RECORD_ARENA_CLEAR_BYTES // RECORD_STRIDE, 900_050)
+        self.assertLess(
+            RECORD_ARENA_BASE + CANONICAL_COLUMNS * RECORD_STRIDE,
+            RECORD_ARENA_END,
+        )
+
     def test_ldr_parser_and_code_flattening(self):
         header = b"CDJ-2000NXS GUIVer1.44\0".ljust(32, b" ")
         code = struct.pack("<IIH", 0x00C60010, 4, 0) + b"ABCD"
@@ -320,6 +382,55 @@ class GuiReceiverTraceTests(unittest.TestCase):
         self.assertEqual(image[0x10:0x14], b"ABCD")
         self.assertEqual(image[0x20:0x23], b"\0\0\0")
         self.assertEqual(image[0x30:0x32], b"EF")
+
+
+class ColorPatchTests(unittest.TestCase):
+    @staticmethod
+    def make_main_image() -> bytes:
+        image = bytearray(b"\0" * (MAIN_TRANSPORT_LENGTH_OFFSET + 2))
+        image[MAIN_INTERNAL_VERSION_OFFSET : MAIN_INTERNAL_VERSION_OFFSET + 4] = b"1.44"
+        for offset in MAIN_TAG_OFFSETS:
+            image[offset : offset + 4] = b"PWV3"
+        image[
+            MAIN_TRANSPORT_LENGTH_OFFSET : MAIN_TRANSPORT_LENGTH_OFFSET + 2
+        ] = MAIN_TRANSPORT_LENGTH_STOCK
+        return bytes(image)
+
+    def test_main_patch_accepts_pwv5_and_sends_payload_bytes(self):
+        patched = patch_main_decompressed(
+            self.make_main_image(), main_version=b"1.46", strict_hash=False
+        )
+        self.assertEqual(
+            patched[MAIN_INTERNAL_VERSION_OFFSET : MAIN_INTERNAL_VERSION_OFFSET + 4],
+            b"1.46",
+        )
+        self.assertTrue(
+            all(patched[offset : offset + 4] == b"PWV5" for offset in MAIN_TAG_OFFSETS)
+        )
+        self.assertEqual(
+            patched[
+                MAIN_TRANSPORT_LENGTH_OFFSET : MAIN_TRANSPORT_LENGTH_OFFSET + 2
+            ],
+            MAIN_TRANSPORT_LENGTH_PWV5,
+        )
+
+    def test_main_patch_rejects_unknown_transport_instruction(self):
+        image = bytearray(self.make_main_image())
+        image[
+            MAIN_TRANSPORT_LENGTH_OFFSET : MAIN_TRANSPORT_LENGTH_OFFSET + 2
+        ] = b"\0\0"
+        with self.assertRaisesRegex(ColorPatchError, "entry-count load"):
+            patch_main_decompressed(bytes(image), strict_hash=False)
+
+    def test_patch_ldr_locator_reports_file_offsets(self):
+        header = b"CDJ-2000NXS GUIVer1.44\0".ljust(32, b" ")
+        code = struct.pack("<IIH", 0x00C60010, 4, 0) + b"ABCD"
+        final = struct.pack("<IIH", 0x00C60030, 2, FINAL) + b"EF"
+        blocks = locate_ldr_blocks(header + code + final)
+        self.assertEqual(blocks[0].header_offset, 0x20)
+        self.assertEqual(blocks[0].data_offset, 0x2A)
+        self.assertEqual(blocks[0].address, 0x00C60010)
+        self.assertEqual(blocks[-1].flags, FINAL)
 
 
 class EthernetTraceTests(unittest.TestCase):

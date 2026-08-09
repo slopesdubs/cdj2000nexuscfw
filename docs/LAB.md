@@ -216,6 +216,40 @@ Live firmware can clamp the converted entry count and visible columns using runt
 display state, so these files exhaustively model the verified per-column transforms,
 not a particular on-screen viewport.
 
+## Build the offline PWV5 experiment
+
+This command creates a hash-gated local candidate from an exact stock v1.44 update.
+It never communicates with a deck, and the output remains ignored by Git:
+
+```bash
+./scripts/build-bfin-binutils.sh
+python3 tools/cdj_lab.py build-pwv5-update work/firmware/C2KNXS.UPD \
+  --toolchain-bin work/toolchain/bfin-elf/bin \
+  --output work/firmware/C2KNXS_v146_PWV5_EXPERIMENTAL.UPD
+```
+
+The adjacent JSON manifest records all patched addresses, hashes, versions, segment
+CRCs, and the remaining hardware gates. The builder accepts only the known stock MAIN
+and GUI hashes. It patches all three MAIN lookup literals, changes the detailed-wave
+transport from descriptor entry count to payload byte count at `0xA425B9EA`, injects
+the GUI converter, redirects both receiver copies to the stock record arena, and makes
+the renderer load RGB555 from record `+4`. Backwards expansion prevents output records
+from overwriting unread two-byte input words.
+The build also disassembles the linked consumer and rejects it unless the odd-length
+guard, two-byte input indexing, backwards walk, RGB555 store, and final count publish
+are present in the generated Blackfin instructions.
+
+The stock initializer at `0x00D2C0DE` independently proves this arena is not an
+address-gap assumption: it zeroes `0x00A4CDD8` bytes from `0x01011940` through
+`0x01A5E718` via `0x00D4837C`. The canonical converted records consume 357,648 of
+those 10,800,600 bytes. This establishes capacity, but not live ownership or timing.
+
+**Do not install this candidate on a working deck.** It is canonical-track-only and
+has not passed a stock/rebuild/recovery cycle, a chained no-op GUI injection, live
+68-frame timing, or seek/unload stress testing on a sacrificial unit. The generated
+four-segment container also carries the unchanged stock DRIVE segment, which is another
+reason it is an inspection artifact rather than a hardware test image.
+
 ## Ethernet hardware checkpoint
 
 Use an isolated CDJ-to-PC link. Ethernet is behavioral correlation only: USB ANLZ
@@ -256,8 +290,8 @@ Once real inputs are present:
 1. Run the test suite and both inspection commands.
 2. Render `PWV4` and compare it with rekordbox/NXS2 output for the same track.
 3. Record field-value ranges and correct the inferred preview mapping.
-4. Use the verified RGB555 write seam to prototype a separate per-column colour
-   buffer; keep runtime viewport/compositor behavior outside the first prototype.
+4. On sacrificial hardware only, validate recovery and a chained no-op GUI hook before
+   enabling the offline PWV5 prototype.
 5. Capture and scan two time-correlated Ethernet repetitions.
 6. Repeat the handler trace on NXS2 MAIN for `PWV5`, then compare its storage and GUI
    path before designing any patch.

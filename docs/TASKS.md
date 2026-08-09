@@ -72,11 +72,12 @@ one-per-issue. Suggested labels in brackets.
 - [ ] **Capture Ethernet twice.** Same track and phase timeline; scan both PCAPs with
       `tools/ethernet_trace.py`. A repeated absence is still evidence. `[hardware]`
 
-## Phase 3 — code injection (deferred until trace completion)
+## Phase 3 — code injection
 
-- [ ] **Write a build script** that takes a decompressed image + a patch blob + a hook
-      address and emits a flashable `.UPD`. Wraps `lzss_codec` and `upd_build`.
-      `[tooling]`
+- [x] **Write a hash-gated offline patch builder.** It assembles the Blackfin blobs,
+      patches MAIN and GUI, recompresses MAIN, rebuilds the four-segment container,
+      and verifies every checksum. Its output is explicitly not hardware-approved.
+      `[tooling] [milestone]`
 - [ ] **Inject a no-op routine.** Place in free space (`0xA40D57C4`, 174 KB of `0xFF`),
       redirect one harmless call, have it chain to the original. Pass = deck still
       boots. `[hardware] [milestone]`
@@ -102,13 +103,23 @@ one-per-issue. Suggested labels in brackets.
       remaining unknown in the container format. Not on the critical path.
       `[analysis] [low-priority]`
 
-## Phase 5 — the actual feature (blocked on Phases 2–4)
+## Phase 5 — the actual feature
 
-- [ ] Add `PWV4`/`PWV5` parser entries and handlers on SH-4.
-- [ ] Extend the MAIN→GUI protocol to carry per-column colour.
-- [ ] Prototype a parallel RGB555-per-column buffer and redirect `0x00D2E230`'s
-      palette load to it; avoid widening the shared 12-byte record initially.
-- [ ] Blackfin toolchain + colour rendering on the GUI processor.
+- [x] **Prototype PWV5 acceptance on SH-4.** Reuse the generic two-byte-entry parser by
+      changing the three shared lookup literals. `[offline-only]`
+- [x] **Carry the full PWV5 payload through MAIN→GUI.** Patch `0xA425B9EA` to use
+      descriptor payload byte count rather than entry count; the real 59,608-byte EXT
+      round-trips in 68 frames. `[offline-only]`
+- [x] **Prototype an RGB555-per-column renderer source.** Receive PWV5 into the stock
+      record arena, expand it backwards into 12-byte records with RGB555 at `+4`, and
+      redirect `0x00D2E230`. `[offline-only]`
+- [ ] **Pass the sacrificial-deck gates.** Prove recovery, then no-op injection, then
+      68-frame load, zoom, seek, unload, and repeated-track stress. `[hardware] [blocker]`
+- [ ] **Generalise beyond the 29,804-column ceiling.** The stock clear proves a
+      10,800,600-byte arena; now prove all live users and add safe handling/fallback
+      for different tag availability and lengths.
+- [x] **Build the Blackfin toolchain and offline colour renderer hook.** The generated
+      consumer is machine-code audited during every candidate build. `[offline-only]`
 
 ## Standing / anytime
 

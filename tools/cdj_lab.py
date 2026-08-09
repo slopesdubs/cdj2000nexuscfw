@@ -22,6 +22,7 @@ from gui_receiver_trace import (
     write_gui_receiver_trace,
 )
 from nxs_wave_emulator import WaveEmulatorError, emulate_anlz_file
+from nxs_color_patch import ColorPatchError, build_color_update
 from sh4_trace import DEFAULT_BASE, build_trace, parse_int, write_trace_outputs
 from upd_container import (
     SEGMENT_NAMES,
@@ -198,6 +199,13 @@ def emulate_waveform(args: argparse.Namespace) -> int:
         f"pixels={renderer['pixel_format']}, "
         f"surface={renderer['surface_width']}x{renderer['surface_height']}"
     )
+    experimental = manifest.get("experimental_pwv5_patch")
+    if experimental and experimental.get("enabled"):
+        print(
+            "experimental PWV5 path: "
+            f"{experimental['columns']} columns, "
+            f"{experimental['input_bytes']} RGB555 record bytes"
+        )
     print(f"wrote frames and manifest to {args.output}")
     return 0
 
@@ -214,6 +222,22 @@ def trace_gui(args: argparse.Namespace) -> int:
         f"renderer {renderer['column_renderer']}"
     )
     print(f"wrote GUI receiver trace to {args.output}")
+    return 0
+
+
+def build_pwv5_update(args: argparse.Namespace) -> int:
+    repo_root = Path(__file__).resolve().parents[1]
+    manifest = build_color_update(
+        args.path,
+        args.output,
+        repo_root,
+        args.toolchain_bin,
+        args.main_version.encode("ascii"),
+        args.gui_version.encode("ascii"),
+    )
+    print(f"built offline PWV5 candidate: {args.output}")
+    print(f"sha256={manifest['output_sha256']}")
+    print(manifest["status"])
     return 0
 
 
@@ -284,6 +308,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="opaque first-frame 16-bit word at offset 12 (default: 0)",
     )
     emulate.set_defaults(handler=emulate_waveform)
+
+    color_update = commands.add_parser(
+        "build-pwv5-update",
+        help="build a hash-gated offline experimental PWV5 MAIN+GUI update",
+    )
+    color_update.add_argument("path", type=Path, help="stock v1.44 four-segment UPD")
+    color_update.add_argument("--output", "-o", type=Path, required=True)
+    color_update.add_argument(
+        "--toolchain-bin",
+        type=Path,
+        default=Path("work/toolchain/bfin-elf/bin"),
+    )
+    color_update.add_argument("--main-version", default="1.46")
+    color_update.add_argument("--gui-version", default="1.201")
+    color_update.set_defaults(handler=build_pwv5_update)
     return parser
 
 
@@ -297,6 +336,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         UpdError,
         AnlzError,
         WaveEmulatorError,
+        ColorPatchError,
         GuiTraceError,
         ValueError,
     ) as exc:

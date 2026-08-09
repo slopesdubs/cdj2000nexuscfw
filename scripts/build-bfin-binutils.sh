@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build only the GNU Blackfin objdump used by the stock GUI receiver trace.
+# Build the GNU Blackfin assembler/linker/binutils used by GUI trace and patch work.
 set -eu
 
 BINUTILS_VERSION=2.45.1
@@ -7,8 +7,10 @@ BINUTILS_VERSION=2.45.1
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 install_dir="$repo_dir/work/toolchain/bfin-elf"
 objdump="$install_dir/bin/bfin-elf-objdump"
+assembler="$install_dir/bin/bfin-elf-as"
+linker="$install_dir/bin/bfin-elf-ld"
 
-if [ -x "$objdump" ]; then
+if [ -x "$objdump" ] && [ -x "$assembler" ] && [ -x "$linker" ]; then
     installed_version=$("$objdump" --version | head -1)
     case "$installed_version" in
         *"$BINUTILS_VERSION"*)
@@ -50,12 +52,11 @@ cd "$build_dir"
     --disable-gdb \
     --disable-gprofng \
     --disable-gold \
-    --disable-ld \
-    --disable-gas \
     --disable-sim \
     --with-system-zlib
 
-make all-binutils MAKEINFO=true
-make install-binutils MAKEINFO=true
+make all-binutils all-gas all-ld MAKEINFO=true
+make install-binutils install-gas install-ld MAKEINFO=true
 "$objdump" --version | head -1
-echo "Installed in $install_dir/bin"
+"$assembler" --version | head -1
+echo "Installed assembler, linker, and binutils in $install_dir/bin"

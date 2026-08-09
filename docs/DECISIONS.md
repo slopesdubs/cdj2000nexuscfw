@@ -33,3 +33,22 @@ advances over the payload. Patch design, signing, rebuilding, and flashing are d
 until the remaining storage-to-GUI staging edge is proved or isolated. Ethernet is the
 first hardware checkpoint, but a repeatable lack of waveform bytes there is accepted
 as evidence because the internal MAIN-to-GUI stream need not traverse Pro DJ Link.
+
+## 2026-08-09 — Reuse the waveform-record arena for the first colour prototype
+The completed PWV3 trace exposed an exact low-impact seam, but the stock 36,824-byte
+receive area is too small for canonical 59,608-byte PWV5. The first offline prototype
+keeps command-32 framing, redirects reception to the 357,648-byte waveform-record
+region needed by the canonical track inside the stock-cleared 10,800,600-byte arena,
+hides its visible count on the first copy, and expands input backwards into
+12-byte records after final-frame CRC validation. RGB555 lives at record `+4` and the
+renderer reads it there. MAIN must use payload byte count rather than entry count, or
+only half of PWV5 is transmitted. Stock initializer `0x00D2C0DE` proves the arena spans
+`0x01011940`–`0x01A5E718` by passing `0x00A4CDD8` bytes to the byte-fill routine at
+`0x00D4837C`. Record-arena lifecycle and doubled transfer timing remain explicit
+hardware gates.
+
+## 2026-08-09 — Generated PWV5 updates are inspection artifacts until hardware gates pass
+The patch builder is intentionally hash-gated and marks its output not hardware-approved.
+No candidate may be installed on a working deck. A sacrificial unit must first pass the
+official-stock update, local rebuild, recovery, and chained no-op GUI injection tests.
+The initial colour candidate is also limited to the canonical 29,804-column sample.

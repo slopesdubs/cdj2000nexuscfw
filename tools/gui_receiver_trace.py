@@ -20,6 +20,11 @@ CODE_LIMIT = 0x00D50000
 ZEROFILL = 0x0001
 FINAL = 0x8000
 PALETTE_ADDRESS = 0x00CD3928
+RECORD_ARENA_BASE = 0x01011940
+RECORD_ARENA_CLEAR_BYTES = 0x00A4CDD8
+RECORD_ARENA_END = RECORD_ARENA_BASE + RECORD_ARENA_CLEAR_BYTES
+RECORD_STRIDE = 12
+CANONICAL_COLUMNS = 29_804
 EXPECTED_RGB555_PALETTE = (
     0x0993,
     0x0A17,
@@ -51,6 +56,8 @@ FOCUSED_RANGES: Sequence[Tuple[str, int, int]] = (
     ("detail-command-20", 0x00D0FA64, 0x00D0FE00),
     ("completion-event", 0x00D0F358, 0x00D0F540),
     ("column-consumer", 0x00D2F51C, 0x00D2F60E),
+    ("record-arena-init", 0x00D2C0DE, 0x00D2C118),
+    ("byte-fill", 0x00D4837C, 0x00D483DA),
     ("rgb555-packer", 0x00D2C052, 0x00D2C06A),
     ("column-renderer", 0x00D2E17C, 0x00D2E34E),
     ("waveform-surface", 0x00D2F0BE, 0x00D2F51C),
@@ -150,6 +157,18 @@ def _validate_disassembly(disassembly: Dict[str, str]) -> None:
             "R5=0xe0",
             "R6=0x1f",
             "P0=0x1011940",
+        ),
+        "record-arena-init": (
+            "d2c0de:",
+            "R2=0xa4cdd8",
+            "R0=0x1011940",
+            "CALL 0x0xd4837c",
+        ),
+        "byte-fill": (
+            "d4837c:",
+            "P0 = R0",
+            "P2 = R2",
+            "B[P0++] = R1",
         ),
         "rgb555-packer": (
             "d2c052:",
@@ -276,8 +295,8 @@ def build_gui_receiver_trace(gui_path: Path, objdump_path: Path) -> Tuple[dict, 
             "event_handler": "0x00D0F4F4",
             "first_consumer": "0x00D2F51C",
             "source_buffer": "0x01A65168",
-            "destination_base": "0x01011940",
-            "record_stride": 12,
+            "destination_base": f"0x{RECORD_ARENA_BASE:08X}",
+            "record_stride": RECORD_STRIDE,
             "height": "raw & 0x1F",
             "legacy_color_code": "(raw & 0xE0) >> 5",
             "packed_word": "legacy_color_code << 8 | height",
@@ -286,6 +305,23 @@ def build_gui_receiver_trace(gui_path: Path, objdump_path: Path) -> Tuple[dict, 
                 "The live conversion count is clamped through runtime state before "
                 "the byte loop; the clamp bounds are not statically initialized."
             ),
+            "record_arena": {
+                "initializer": "0x00D2C0DE",
+                "clear_routine": "0x00D4837C",
+                "base": f"0x{RECORD_ARENA_BASE:08X}",
+                "clear_bytes": RECORD_ARENA_CLEAR_BYTES,
+                "end_exclusive": f"0x{RECORD_ARENA_END:08X}",
+                "record_capacity": RECORD_ARENA_CLEAR_BYTES // RECORD_STRIDE,
+                "canonical_columns": CANONICAL_COLUMNS,
+                "canonical_record_bytes": CANONICAL_COLUMNS * RECORD_STRIDE,
+                "canonical_end_exclusive": (
+                    f"0x{RECORD_ARENA_BASE + CANONICAL_COLUMNS * RECORD_STRIDE:08X}"
+                ),
+                "evidence": (
+                    "initializer passes base 0x01011940, zero fill byte, and "
+                    "0x00A4CDD8-byte length to the verified byte-fill routine"
+                ),
+            },
         },
         "renderer": {
             "height_accessor": "0x00D2E17C",
@@ -334,6 +370,7 @@ def _markdown(trace: dict) -> str:
     t = trace["transport"]
     r = trace["receiver"]
     c = trace["consumer"]
+    arena = c["record_arena"]
     renderer = trace["renderer"]
     return "\n".join(
         [
@@ -350,6 +387,8 @@ def _markdown(trace: dict) -> str:
             f"- Reassembly lands at `{r['reassembly_buffer']}`.",
             f"- Completion event `{c['completion_event']}` reaches `{c['first_consumer']}`.",
             f"- Each PWV3 byte becomes `height = {c['height']}` and `legacy_colour = {c['legacy_color_code']}` in a {c['record_stride']}-byte record at `{c['destination_base']}`.",
+            f"- Stock initializer `{arena['initializer']}` clears {arena['clear_bytes']:,} bytes from `{arena['base']}` through `{arena['end_exclusive']}` using `{arena['clear_routine']}`, proving capacity for {arena['record_capacity']:,} records.",
+            f"- The canonical {arena['canonical_columns']:,}-column waveform occupies only {arena['canonical_record_bytes']:,} bytes and ends at `{arena['canonical_end_exclusive']}`.",
             f"- `{renderer['column_renderer']}` reads those fields and indexes the eight-entry palette at `{renderer['palette_address']}`.",
             f"- The selected {renderer['pixel_format']} is written into the {renderer['surface_dimensions']['width']}×{renderer['surface_dimensions']['height']} layer at `{renderer['surface_address']}` with a {renderer['surface_row_bytes']}-byte row stride.",
             f"- The vertical waveform baseline is `{renderer['waveform_baseline_address']}`; columns extend upward by at most {renderer['maximum_height_pixels']} pixels.",

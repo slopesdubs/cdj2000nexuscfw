@@ -24,6 +24,12 @@ is mapped. An offline emulator reproduces the 896-byte frames, Blackfin reassemb
 Only the generic layer-to-DMA compositor and NXS2 GUI segment compression remain
 unresolved; neither obscures the stock waveform colour seam.
 
+**Offline PWV5 prototype complete:** a hash-gated builder now changes the parser
+lookup, sends the full two-byte-per-column payload, converts PWV5 to height plus RGB555
+in the stock waveform-record arena, and redirects the proven renderer load. The supplied real
+EXT passes 68 CRC-valid frames and produces 29,804 colour columns. This is not yet safe
+or approved for installation on hardware.
+
 **Untested:** everything, on hardware.
 
 ## No firmware in this repo
@@ -56,6 +62,7 @@ tools/
   cdj_lab.py               command-line entry point for the offline lab
   sh4_trace.py             read-only SH-4 tag/xref/data-flow report generator
   nxs_wave_emulator.py     stock detailed-waveform frame encoder/reassembler
+  nxs_color_patch.py       hash-gated offline PWV5 MAIN+GUI candidate builder
   ethernet_trace.py        read-only PCAP/PCAPNG waveform correlation scanner
   sh4dis.py                SH-4 disassembler (little-endian)
   bfindis.py               Blackfin disassembler (GUI processor)
@@ -183,15 +190,15 @@ Keep untouched stock v1.44 on a USB stick at all times as the way back.
 
 ## Next steps
 
-1. Prototype a parallel RGB555 column buffer so true PWV5 colour can reach the proven
-   palette-write seam without changing every 12-byte-record consumer.
-2. Crack or bypass the NXS2 compressed GUI stream and compare its PWV5 receiver and
-   per-column structure as the colour positive control.
-3. Make two phase-timed Ethernet captures with the same track and run the correlation
-   scanner. A negative result is useful and expected to be possible.
-4. Trace the NXS2 MAIN `PWV5` handler and outbound message as a control.
-5. Only after the trace phase, prove the stock/rebuild/recovery loop on sacrificial
-   hardware before any code injection or colour-waveform patch design.
+1. On a sacrificial deck, prove official-stock update, local rebuild, and recovery.
+2. Inject a chained no-op GUI routine and confirm boot/load behavior before enabling
+   any PWV5 hooks.
+3. Measure the 68-frame transfer and stress track load, zoom, seek, and unload while
+   watching the GUI receiver-buffer lifetime.
+4. Generalise the canonical 29,804-column guard and add a legacy fallback for tracks
+   without PWV5.
+5. Compare the NXS2 PWV5 receiver as a positive control when its GUI compression is
+   available.
 
 ## Licence
 
